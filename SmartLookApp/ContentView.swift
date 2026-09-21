@@ -2027,15 +2027,63 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 // No direct viewer navigation occurs after sign-in or acknowledgement.
 private struct MVDExternalCMMDocumentView: View {
     let target: MVDDocumentTarget
-    @State private var opened = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @SceneStorage("mvd_last_external_cmm_url") private var lastOpenedURL = ""
+    @State private var status = "Opening the CMM in Safari…"
+
+    private var targetURLString: String { target.url.absoluteString }
+
+    private func openInSafari() {
+        lastOpenedURL = targetURLString
+        status = "CMM opened in Safari. Return here to keep working with the same search."
+        UIApplication.shared.open(target.url, options: [:])
+    }
 
     var body: some View {
-        Color.clear
-            .onAppear {
-                guard !opened else { return }
-                opened = true
-                UIApplication.shared.open(target.url, options: [:])
+        VStack(spacing: 14) {
+            Image(systemName: "safari")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(.blue)
+
+            Text("CMM OPENED IN SAFARI")
+                .font(.headline.weight(.black))
+
+            Text(target.title)
+                .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(.center)
+
+            Text(status)
+                .font(.caption)
+                .foregroundStyle(scenePhase == .active ? .secondary : .orange)
+                .multilineTextAlignment(.center)
+
+            Button { openInSafari() } label: {
+                Label("OPEN CMM IN SAFARI", systemImage: "arrow.up.forward.app")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
+
+            Button("RETURN TO SEARCH") { dismiss() }
+                .buttonStyle(.bordered)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(MVDTheme.background.ignoresSafeArea())
+        .onAppear {
+            // SceneStorage prevents SwiftUI from reopening Safari when the
+            // user returns from it or when the cover is reconstructed.
+            guard lastOpenedURL != targetURLString else {
+                status = "CMM opened in Safari. Return here to keep working with the same search."
+                return
+            }
+            openInSafari()
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active, lastOpenedURL == targetURLString {
+                status = "Returned from Safari. The previous search, images and aircraft context remain open."
+            }
+        }
     }
 }
 
