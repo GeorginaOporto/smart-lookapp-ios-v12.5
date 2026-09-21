@@ -1937,7 +1937,45 @@ private struct MVDDocumentWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // The authenticated Flatirons route often stops on its document
+            // cover and renders a yellow "Open Document" control. That
+            // control is the portal's last hand-off to the trained PDF, so
+            // activate it after the sign-in session is already established.
+            // Some portal builds render it asynchronously; retry briefly
+            // instead of requiring a second manual tap.
+            openDocumentControl(in: webView, attempt: 0)
             captureText(from: webView, remainingAttempts: 8)
+        }
+
+        private func openDocumentControl(in webView: WKWebView, attempt: Int) {
+            guard attempt < 10 else { return }
+            let script = """
+            (() => {
+              const visible = node => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)
+                && getComputedStyle(node).visibility !== 'hidden';
+              const text = node => (node.innerText || node.textContent || node.value || '')
+                .replace(/\\s+/g, ' ').trim().toLowerCase();
+              const label = node => ((node.getAttribute('aria-label') || '') + ' '
+                + (node.getAttribute('title') || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
+              const documents = [document];
+              for (const frame of document.querySelectorAll('iframe')) {
+                try { if (frame.contentDocument) documents.push(frame.contentDocument); } catch (_) {}
+              }
+              const control = documents.flatMap(doc => Array.from(
+                doc.querySelectorAll('button,a,[role=button],input')
+              )).filter(visible).find(node => /open\\s+(this\\s+)?document/.test(text(node))
+                || /open\\s+(this\\s+)?document/.test(label(node)));
+              if (!control) return false;
+              control.click();
+              return true;
+            })();
+            """
+            webView.evaluateJavaScript(script) { result, _ in
+                guard !((result as? Bool) ?? false), attempt + 1 < 10 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                    self.openDocumentControl(in: webView, attempt: attempt + 1)
+                }
+            }
         }
 
         private func captureText(from webView: WKWebView, remainingAttempts: Int) {
