@@ -1752,6 +1752,13 @@ private struct MVDAndroidTrainingRecord: Decodable {
     let isAadr: Bool?
     let isGpm: Bool?
     let isEo: Bool?
+    let isAard200: Bool?
+    let aard200Link: String?
+    let isAard300: Bool?
+    let aard300Link: String?
+    let isRvsm: Bool?
+    let rvsmLink: String?
+    let gpmLink: String?
     let checkLink: String?
     let riiLink: String?
     let lmpLink: String?
@@ -1764,6 +1771,13 @@ private struct MVDAndroidTrainingRecord: Decodable {
     let etops_link: String?
     let eo_link: String?
     let aadr_link: String?
+    let is_aard_200: Bool?
+    let aard_200_link: String?
+    let is_aard_300: Bool?
+    let aard_300_link: String?
+    let is_rvsm: Bool?
+    let rvsm_link: String?
+    let gpm_link: String?
     let description: String?
     let imageFiles: [String]?
     let imageEmbeddings: [[Float]]?
@@ -1802,6 +1816,13 @@ private struct MVDAndroidTrainingRecord: Decodable {
         result.isAadr = isAadr ?? false
         result.isGpm = isGpm ?? false
         result.isEo = isEo ?? false
+        result.isAard200 = isAard200 ?? is_aard_200 ?? false
+        result.aard200Link = aard200Link ?? aard_200_link ?? ""
+        result.isAard300 = isAard300 ?? is_aard_300 ?? false
+        result.aard300Link = aard300Link ?? aard_300_link ?? ""
+        result.isRvsm = isRvsm ?? is_rvsm ?? false
+        result.rvsmLink = rvsmLink ?? rvsm_link ?? ""
+        result.gpmLink = gpmLink ?? gpm_link ?? ""
         result.checkLink = checkLink ?? ""
         result.riiLink = riiLink ?? rii_link ?? ""
         result.lmpLink = lmpLink ?? lmp_link ?? ""
