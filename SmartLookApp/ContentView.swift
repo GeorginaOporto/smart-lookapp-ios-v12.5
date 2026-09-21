@@ -2510,6 +2510,7 @@ struct TrainingView: View {
                     isLmp: lmp,
                     lmpLink: lmpLink,
                     isEtops: etops,
+                    isGpm: gpm,
                     etopsLink: etopsLink,
                     isRvsm: rvsm,
                     rvsmLink: rvsmLink,
@@ -2519,7 +2520,6 @@ struct TrainingView: View {
                     aard200Link: aard200Link,
                     isAard300: aard300,
                     aard300Link: aard300Link,
-                    isGpm: gpm,
                     gpmLink: gpmLink,
                     description: description.isEmpty ? ocrText : description,
                     imageFiles: importedPhotoNames
@@ -2531,7 +2531,8 @@ struct TrainingView: View {
                 Label("ADD MANUAL TO PAYLOAD", systemImage: "plus.circle.fill")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)            if saved { Text("Sanitized training record staged locally.").foregroundStyle(.green) }
+            .buttonStyle(.borderedProminent)
+            if saved { Text("Sanitized training record staged locally.").foregroundStyle(.green) }
         }
         .scrollContentBackground(.hidden)
         .background(MVDTheme.background.ignoresSafeArea())
