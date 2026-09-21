@@ -2445,7 +2445,7 @@ struct TrainingView: View {
                     } label: {
                         VStack(spacing: 2) {
                             Text("CMM LOCATION").font(.caption.weight(.bold))
-                            Text(selectedSeat.isEmpty ? "SELECT AIRCRAFT LOCATION" : "SEAT: \(selectedSeat)\(selectedCMMNumber.isEmpty ? "" : " • CMM \(selectedCMMNumber))")
+                            Text(selectedSeat.isEmpty ? "SELECT AIRCRAFT LOCATION" : "SEAT: \(selectedSeat)\(selectedCMMNumber.isEmpty ? "" : " • CMM \(selectedCMMNumber)")")
                                 .font(.caption2)
                         }
                         .frame(maxWidth: .infinity)
