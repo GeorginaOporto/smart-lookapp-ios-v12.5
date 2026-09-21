@@ -1370,6 +1370,12 @@ struct SearchResult: View {
         return aard300Enabled ? payload.aadrLink : ""
     }
 
+    private var hasSafetyDocument: Bool {
+        payload.isRii || payload.isLmp || payload.isEtops || payload.isEwis ||
+        payload.isRvsm == true || payload.isAard200 == true || payload.isAard300 == true ||
+        payload.isAadr || payload.isGpm
+    }
+
     @ViewBuilder
     private func safetyDocumentButton(_ title: String, enabled: Bool, rawLink: String, tint: Color) -> some View {
         if enabled, let url = documentURL(from: rawLink) {
@@ -1489,7 +1495,7 @@ struct SearchResult: View {
             if !mocMessage.isEmpty {
                 Text(mocMessage).font(.caption).foregroundStyle(mocMessage.hasPrefix("Unable") ? .red : .green)
             }
-            if let related = payload.relatedDocumentURL {
+            if let related = payload.relatedDocumentURL, !hasSafetyDocument {
                 openDocumentButton("RELATED DOCUMENT / CHECK LINK", url: related, tint: .green)
             }
             Text(status).font(.caption.weight(.bold)).foregroundStyle(status == "MATCH FOUND" ? .green : .yellow)
@@ -2262,6 +2268,11 @@ struct TrainingView: View {
     @State private var eicas = ""
     @State private var level = ""
     @State private var description = ""
+    @State private var selectedManualType = "AMM"
+    @State private var trainingLink = ""
+    @State private var manualAta = ""
+    @State private var subAta = ""
+    @State private var ocrText = ""
     @State private var rii = false
     @State private var lmp = false
     @State private var etops = false
@@ -2332,11 +2343,38 @@ struct TrainingView: View {
         photoStatus = "Camera photo staged locally for \(session.nose)."
     }
 
+    private let manualTypes = ["AMM", "AIPC", "FIM", "CMM", "WDM", "MEL"]
+
+    private var selectedCMMNumber: String {
+        guard selectedManualType.uppercased() == "CMM",
+              !selectedSeat.isEmpty,
+              let aircraft = session.aircraft,
+              let configuration = MVDLocationData.configuration(
+                manufacturer: aircraft.manufacturer,
+                model: aircraft.model,
+                nose: session.nose
+              ) else { return "" }
+        return MVDLocationData.resolveCMM(
+            for: MVDCMMLocationSelection(domain: .seat, location: selectedSeat),
+            configuration: configuration
+        ) ?? ""
+    }
+
+    private func parseATAFromLink() {
+        let decoded = trainingLink.removingPercentEncoding ?? trainingLink
+        guard let match = decoded.range(of: #"(\d{2})-(\d{2})-(\d{2})"#, options: .regularExpression) else { return }
+        let value = String(decoded[match])
+        let pieces = value.split(separator: "-")
+        guard pieces.count == 3 else { return }
+        manualAta = String(pieces[0])
+        subAta = "\(pieces[1])-\(pieces[2])"
+    }
+
     private func safetyRow(_ title: String, isOn: Binding<Bool>, link: Binding<String>) -> some View {
         HStack(spacing: 8) {
             Toggle(title, isOn: isOn)
                 .font(.caption.weight(.semibold))
-                .frame(width: 110, alignment: .leading)
+                .frame(width: 108, alignment: .leading)
             TextField("\(title) DOCUMENT LINK", text: link)
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.never)
@@ -2390,33 +2428,81 @@ struct TrainingView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            Section("MANUAL LINKS QUEUE") { TextField("PASTE BOEING LINK", text: .constant("")); HStack { TextField("ATA", text: .constant("")); TextField("SUB-ATA", text: .constant("")) }; Button("ADD TO QUEUE (+)") { } }
-            Section("GENERAL INFORMATION") {
-                TextField("PART NAME", text: $partName)
-                HStack { TextField("FAULT CODE", text: $faultCode); TextField("PAGE #", text: $page) }
-                HStack { TextField("EICAS MESSAGE", text: $eicas); TextField("LEVEL", text: $level) }
-                TextField("DESCRIPTION / NOTES", text: $description, axis: .vertical).lineLimit(2...5)
-            }
-            Section("SAFETY CRITICAL ITEMS") {
+            Section("MANUAL DOCUMENT") {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(manualTypes, id: \.self) { type in
+                            Button(type) { selectedManualType = type }
+                                .buttonStyle(.borderedProminent)
+                                .tint(selectedManualType == type ? .blue : .gray)
+                                .controlSize(.small)
+                        }
+                    }
+                }
+                if selectedManualType.uppercased() == "CMM" {
+                    Button {
+                        if selectedSeat.isEmpty { selectedSeat = MVDLocalSeatCatalog.seats(for: session.nose).first ?? "" }
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text("CMM LOCATION").font(.caption.weight(.bold))
+                            Text(selectedSeat.isEmpty ? "SELECT AIRCRAFT LOCATION" : "SEAT: \(selectedSeat)\(selectedCMMNumber.isEmpty ? "" : " • CMM \(selectedCMMNumber))")
+                                .font(.caption2)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.purple)
+                }
+                HStack(spacing: 8) {
+                    TextField("DOCUMENT LINK", text: $trainingLink)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button(action: parseATAFromLink) { Image(systemName: "wand.and.stars") }
+                        .buttonStyle(.bordered)
+                        .tint(.purple)
+                }
+                TextField("PAGE", text: $page)
+                HStack(spacing: 8) {
+                    TextField("ATA", text: $manualAta)
+                    TextField("SUB-ATA", text: $subAta)
+                }
+                TextField("PART NAME / COMPONENT", text: $partName)
+                TextField("TEXTO OCR (P/N, S/N, FABRICANTE)", text: $ocrText)
+                Divider()
+                Text("WARNINGS").font(.caption.weight(.bold))
                 safetyRow("RII", isOn: $rii, link: $riiLink)
                 safetyRow("LMP", isOn: $lmp, link: $lmpLink)
+                safetyRow("EWIS", isOn: $ewis, link: $ewisLink)
                 safetyRow("ETOPS", isOn: $etops, link: $etopsLink)
                 safetyRow("RVSM", isOn: $rvsm, link: $rvsmLink)
-                safetyRow("EWIS", isOn: $ewis, link: $ewisLink)
                 safetyRow("AARD-200", isOn: $aard200, link: $aard200Link)
                 safetyRow("AARD-300", isOn: $aard300, link: $aard300Link)
                 safetyRow("GPM", isOn: $gpm, link: $gpmLink)
             }
+            Section("GENERAL INFORMATION") {
+                HStack { TextField("FAULT CODE", text: $faultCode); TextField("EICAS MESSAGE", text: $eicas) }
+                HStack { TextField("EICAS LEVEL", text: $level); TextField("DESCRIPTION / NOTES", text: $description) }
+            }
             Button {
+                guard !trainingLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 store.saveTraining(MVDTrainingPayload(
+                    recordId: "TRAINING-\(session.nose)-\(selectedManualType)-\(UUID().uuidString)",
                     aircraftNose: session.nose,
                     model: session.aircraft?.model ?? "N/A",
+                    manufacturer: session.aircraft?.manufacturer ?? "Boeing",
                     customerCode: session.aircraft?.customer ?? "DEMO",
-                    manualType: "AMM",
-                    ataChapter: faultCode.isEmpty ? "N/A" : faultCode,
+                    manualType: selectedManualType,
+                    cmmNumber: selectedCMMNumber,
+                    ataChapter: manualAta.isEmpty ? "N/A" : manualAta,
+                    subAta: subAta,
                     partName: partName.isEmpty ? "Sanitized component" : partName,
                     faultCode: faultCode,
-                    eicasMessage: eicas,
+                    eicasMessage: eicas.isEmpty ? ocrText : eicas,
+                    eicasLevel: level,
+                    pinpointLink: trainingLink,
+                    trainingProcedureLink: trainingLink,
+                    pageNumber: page,
                     isRii: rii,
                     riiLink: riiLink,
                     isEwis: ewis,
@@ -2435,12 +2521,17 @@ struct TrainingView: View {
                     aard300Link: aard300Link,
                     isGpm: gpm,
                     gpmLink: gpmLink,
-                    description: description.isEmpty ? "Local MVD training record" : description,
+                    description: description.isEmpty ? ocrText : description,
                     imageFiles: importedPhotoNames
                 ))
+                trainingLink = ""
+                page = ""
                 saved = true
-            } label: { Label("SAVE ALL & COMPRESS DATA", systemImage: "externaldrive.badge.checkmark") }
-            if saved { Text("Sanitized training record staged locally.").foregroundStyle(.green) }
+            } label: {
+                Label("ADD MANUAL TO PAYLOAD", systemImage: "plus.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)            if saved { Text("Sanitized training record staged locally.").foregroundStyle(.green) }
         }
         .scrollContentBackground(.hidden)
         .background(MVDTheme.background.ignoresSafeArea())
