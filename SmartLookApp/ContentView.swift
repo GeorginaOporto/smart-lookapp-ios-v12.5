@@ -2055,7 +2055,7 @@ private struct MVDExternalCMMDocumentView: View {
 
             Text(status)
                 .font(.caption)
-                .foregroundStyle(scenePhase == .active ? .secondary : .orange)
+                .foregroundStyle(scenePhase == .active ? Color.secondary : Color.orange)
                 .multilineTextAlignment(.center)
 
             Button { openInSafari() } label: {
