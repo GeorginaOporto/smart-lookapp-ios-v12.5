@@ -1336,6 +1336,47 @@ struct SearchResult: View {
         return value.replacingOccurrences(of: "AADR", with: "AARD")
     }
 
+    private var ataLabel: String {
+        [payload.ataChapter, payload.subAta]
+            .filter { !$0.isEmpty && $0 != "N/A" }
+            .joined(separator: "-")
+    }
+
+    private var primaryDocumentTitle: String {
+        let normalized = displayedManual.isEmpty ? "DOCUMENT" : displayedManual
+        if normalized == "CMM", !payload.cmmNumber.isEmpty { return "CMM \(payload.cmmNumber)" }
+        return ataLabel.isEmpty ? normalized : "\(normalized) \(ataLabel)"
+    }
+
+    private func safetyTitle(_ name: String) -> String {
+        ataLabel.isEmpty ? name : "\(name) \(ataLabel)"
+    }
+
+    private var aard200Enabled: Bool {
+        payload.isAard200 == true || (payload.isAadr && aardManualLabel == "AARD-200")
+    }
+
+    private var aard200RawLink: String {
+        if let link = payload.aard200Link, !link.isEmpty { return link }
+        return aard200Enabled ? payload.aadrLink : ""
+    }
+
+    private var aard300Enabled: Bool {
+        payload.isAard300 == true || (payload.isAadr && aardManualLabel == "AARD-300")
+    }
+
+    private var aard300RawLink: String {
+        if let link = payload.aard300Link, !link.isEmpty { return link }
+        return aard300Enabled ? payload.aadrLink : ""
+    }
+
+    @ViewBuilder
+    private func safetyDocumentButton(_ title: String, enabled: Bool, rawLink: String, tint: Color) -> some View {
+        if enabled, let url = documentURL(from: rawLink) {
+            openDocumentButton(title, url: url, tint: tint)
+        }
+    }
+
     private func documentURL(from raw: String) -> URL? {
         guard let match = raw.range(of: #"https?://[^\s)\]]+"#, options: .regularExpression) else { return nil }
         return URL(string: String(raw[match]).replacingOccurrences(of: "\\&", with: "&"))
@@ -1402,51 +1443,20 @@ struct SearchResult: View {
             if !maint.isEmpty {
                 Text("FIM: \(payload.matMessage.isEmpty ? "—" : payload.matMessage)").foregroundStyle(.secondary)
             }
-            if payload.isRii {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("CRITICAL RII ITEM", systemImage: "exclamationmark.triangle.fill")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(.red)
-                    if let riiURL = documentURL(from: payload.riiLink) {
-                        openDocumentButton("OPEN RII DOCUMENT", url: riiURL, tint: .red)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.red.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+            if let url = payload.documentURL {
+                openDocumentButton(primaryDocumentTitle, url: url)
+            } else {
+                Label("\(primaryDocumentTitle) — LINK NOT AVAILABLE", systemImage: "link.slash").foregroundStyle(.secondary)
             }
-            if payload.isEwis {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("EWIS ALERT", systemImage: "bolt.triangle.fill")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(.yellow)
-                    if let ewisURL = documentURL(from: payload.ewisLink) {
-                        openDocumentButton("OPEN EWIS PROCEDURE", url: ewisURL, tint: .yellow)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.yellow.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
-            }
-            if payload.isLmp, let lmpURL = documentURL(from: payload.lmpLink) {
-                openDocumentButton("OPEN LMP DOCUMENT", url: lmpURL, tint: .orange)
-            }
-            if payload.isEtops, let etopsURL = documentURL(from: payload.etopsLink) {
-                openDocumentButton("OPEN ETOPS DOCUMENT", url: etopsURL, tint: .orange)
-            }
-            if payload.isEo, let eoURL = documentURL(from: payload.eoLink) {
-                openDocumentButton("OPEN EO DOCUMENT", url: eoURL, tint: .orange)
-            }
-            if payload.isAadr {
-                Label("\(aardManualLabel) ITEM", systemImage: "exclamationmark.triangle.fill")
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.orange)
-                if let aardURL = documentURL(from: payload.aadrLink) {
-                    openDocumentButton("OPEN \(aardManualLabel) DOCUMENT", url: aardURL, tint: .orange)
-                }
-            }
+            safetyDocumentButton(safetyTitle("RII"), enabled: payload.isRii, rawLink: payload.riiLink, tint: .red)
+            safetyDocumentButton(safetyTitle("LMP"), enabled: payload.isLmp, rawLink: payload.lmpLink, tint: .orange)
+            safetyDocumentButton(safetyTitle("ETOPS"), enabled: payload.isEtops, rawLink: payload.etopsLink, tint: .blue)
+            safetyDocumentButton(safetyTitle("RVSM"), enabled: payload.isRvsm == true, rawLink: payload.rvsmLink ?? "", tint: .purple)
+            safetyDocumentButton(safetyTitle("EWIS"), enabled: payload.isEwis, rawLink: payload.ewisLink, tint: .yellow)
+            safetyDocumentButton(safetyTitle("AARD-200"), enabled: aard200Enabled, rawLink: aard200RawLink, tint: .orange)
+            safetyDocumentButton(safetyTitle("AARD-300"), enabled: aard300Enabled, rawLink: aard300RawLink, tint: .orange)
+            safetyDocumentButton(safetyTitle("GPM"), enabled: payload.isGpm, rawLink: payload.gpmLink ?? "", tint: .indigo)
+            safetyDocumentButton(safetyTitle("EO"), enabled: payload.isEo, rawLink: payload.eoLink, tint: .orange)
             if !qualificationRequirements.isEmpty {
                 Button {
                     showQualificationStatus = true
@@ -1457,11 +1467,6 @@ struct SearchResult: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
                 .accessibilityHint("Opens the live qualification report for the selected aircraft and alert type")
-            }
-            if let url = payload.documentURL {
-                openDocumentButton("OPEN DOCUMENT", url: url)
-            } else {
-                Label("DOCUMENT LINK NOT AVAILABLE", systemImage: "link.slash").foregroundStyle(.secondary)
             }
             HStack {
                 Spacer()
@@ -2260,6 +2265,19 @@ struct TrainingView: View {
     @State private var rii = false
     @State private var lmp = false
     @State private var etops = false
+    @State private var rvsm = false
+    @State private var ewis = false
+    @State private var aard200 = false
+    @State private var aard300 = false
+    @State private var gpm = false
+    @State private var riiLink = ""
+    @State private var lmpLink = ""
+    @State private var etopsLink = ""
+    @State private var rvsmLink = ""
+    @State private var ewisLink = ""
+    @State private var aard200Link = ""
+    @State private var aard300Link = ""
+    @State private var gpmLink = ""
     @State private var selectedSeat = ""
     @State private var saved = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -2312,6 +2330,18 @@ struct TrainingView: View {
         try? data.write(to: destination, options: .atomic)
         importedPhotoNames.append("camera-photo-\(index)")
         photoStatus = "Camera photo staged locally for \(session.nose)."
+    }
+
+    private func safetyRow(_ title: String, isOn: Binding<Bool>, link: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            Toggle(title, isOn: isOn)
+                .font(.caption.weight(.semibold))
+                .frame(width: 110, alignment: .leading)
+            TextField("\(title) DOCUMENT LINK", text: link)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
     }
 
     var body: some View {
@@ -2368,7 +2398,14 @@ struct TrainingView: View {
                 TextField("DESCRIPTION / NOTES", text: $description, axis: .vertical).lineLimit(2...5)
             }
             Section("SAFETY CRITICAL ITEMS") {
-                Toggle("RII", isOn: $rii); Toggle("LMP", isOn: $lmp); Toggle("ETOPS", isOn: $etops)
+                safetyRow("RII", isOn: $rii, link: $riiLink)
+                safetyRow("LMP", isOn: $lmp, link: $lmpLink)
+                safetyRow("ETOPS", isOn: $etops, link: $etopsLink)
+                safetyRow("RVSM", isOn: $rvsm, link: $rvsmLink)
+                safetyRow("EWIS", isOn: $ewis, link: $ewisLink)
+                safetyRow("AARD-200", isOn: $aard200, link: $aard200Link)
+                safetyRow("AARD-300", isOn: $aard300, link: $aard300Link)
+                safetyRow("GPM", isOn: $gpm, link: $gpmLink)
             }
             Button {
                 store.saveTraining(MVDTrainingPayload(
@@ -2380,8 +2417,24 @@ struct TrainingView: View {
                     partName: partName.isEmpty ? "Sanitized component" : partName,
                     faultCode: faultCode,
                     eicasMessage: eicas,
-                    isEwis: false,
+                    isRii: rii,
+                    riiLink: riiLink,
+                    isEwis: ewis,
+                    ewisLink: ewisLink,
                     isLmp: lmp,
+                    lmpLink: lmpLink,
+                    isEtops: etops,
+                    etopsLink: etopsLink,
+                    isRvsm: rvsm,
+                    rvsmLink: rvsmLink,
+                    isAadr: aard200 || aard300,
+                    aadrLink: aard200 ? aard200Link : aard300Link,
+                    isAard200: aard200,
+                    aard200Link: aard200Link,
+                    isAard300: aard300,
+                    aard300Link: aard300Link,
+                    isGpm: gpm,
+                    gpmLink: gpmLink,
                     description: description.isEmpty ? "Local MVD training record" : description,
                     imageFiles: importedPhotoNames
                 ))
