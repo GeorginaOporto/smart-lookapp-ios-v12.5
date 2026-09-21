@@ -229,7 +229,7 @@ struct MVDTrainingPayload: Codable, Identifiable {
     var checkLink: String = ""
     var eoLink: String = ""
     var isAadr: Bool = false
-    var aadrLink: String = ""
+    var aadrLink: String = ""; var isAard200: Bool? = false; var aard200Link: String? = ""; var isAard300: Bool? = false; var aard300Link: String? = ""; var isRvsm: Bool? = false; var rvsmLink: String? = ""; var gpmLink: String? = ""
     var description: String = ""
     var imageFiles: [String] = []
     var imageEmbeddings: [[Float]] = []
