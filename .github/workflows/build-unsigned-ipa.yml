@@ -58,9 +58,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="ios-build-${GITHUB_RUN_NUMBER}"
+          tag="ios-v12.5-build-${GITHUB_RUN_NUMBER}"
           gh release create "$tag" build/SmartLookApp-unsigned.ipa \
             --repo "$GITHUB_REPOSITORY" \
-            --title "SmartLookApp iOS build ${GITHUB_RUN_NUMBER}" \
+            --title "SmartLookApp iOS v12.5 build ${GITHUB_RUN_NUMBER}" \
             --notes "Unsigned IPA generated from the published main branch." \
             --prerelease
