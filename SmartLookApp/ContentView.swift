@@ -1370,6 +1370,14 @@ struct SearchResult: View {
         return aard300Enabled ? payload.aadrLink : ""
     }
 
+    // Some legacy Android training records mark RII with isRii=true but store
+    // the Required Inspection Items document in checkLink instead of riiLink.
+    // Keep the explicit RII link authoritative and use checkLink only as the
+    // compatibility fallback for that exact warning.
+    private var riiRawLink: String {
+        payload.riiLink.isEmpty ? payload.checkLink : payload.riiLink
+    }
+
     private var hasSafetyDocument: Bool {
         payload.isRii || payload.isLmp || payload.isEtops || payload.isEwis ||
         payload.isRvsm == true || payload.isAard200 == true || payload.isAard300 == true ||
@@ -1454,7 +1462,7 @@ struct SearchResult: View {
             } else {
                 Label("\(primaryDocumentTitle) — LINK NOT AVAILABLE", systemImage: "link.slash").foregroundStyle(.secondary)
             }
-            safetyDocumentButton(safetyTitle("RII"), enabled: payload.isRii, rawLink: payload.riiLink, tint: .red)
+            safetyDocumentButton(safetyTitle("RII"), enabled: payload.isRii, rawLink: riiRawLink, tint: .red)
             safetyDocumentButton(safetyTitle("LMP"), enabled: payload.isLmp, rawLink: payload.lmpLink, tint: .orange)
             safetyDocumentButton(safetyTitle("ETOPS"), enabled: payload.isEtops, rawLink: payload.etopsLink, tint: .blue)
             safetyDocumentButton(safetyTitle("RVSM"), enabled: payload.isRvsm == true, rawLink: payload.rvsmLink ?? "", tint: .purple)
