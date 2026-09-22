@@ -197,6 +197,8 @@ enum MVDLocalSeatCatalog {
 struct MVDTrainingPayload: Codable, Identifiable {
     var id: String { recordId.isEmpty ? "\(aircraftNose)-\(ataChapter)-\(partName)" : recordId }
     var recordId: String = ""
+    /// Android-compatible technical index, e.g. BA-B777-2500001.
+    var ucid: String = ""
     var aircraftNose: String = "N/A"
     var model: String = "N/A"
     var manufacturer: String = "Boeing"
@@ -209,6 +211,7 @@ struct MVDTrainingPayload: Codable, Identifiable {
     var unit: String = ""
     var item: String = ""
     var partName: String = ""
+    var labeledName: String = ""
     var faultCode: String = ""
     var matMessage: String = ""
     var eicasMessage: String = ""
