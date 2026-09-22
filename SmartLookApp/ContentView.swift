@@ -1352,6 +1352,36 @@ private struct MailComposeView: UIViewControllerRepresentable {
     }
 }
 
+
+private func mvdActualDocumentTitle(_ url: URL, fallbackManual: String) -> String {
+    let fallback = fallbackManual.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    var candidates: [String] = []
+    if let fragment = url.fragment {
+        let query = fragment.components(separatedBy: "?").dropFirst().joined(separator: "?")
+        if let items = URLComponents(string: "https://smartlookapp.invalid/?" + query)?.queryItems {
+            candidates.append(contentsOf: [
+                items.first(where: { $0.name == "documentTitle" })?.value,
+                items.first(where: { $0.name == "documentID" })?.value
+            ].compactMap { $0 })
+        }
+    }
+    candidates.append(url.lastPathComponent)
+    for raw in candidates {
+        let decoded = raw.removingPercentEncoding ?? raw
+        let suffix = decoded.components(separatedBy: "__").last ?? decoded
+        let cleaned = suffix.replacingOccurrences(of: ".pdf", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = cleaned.range(of: #"\d{2}[- ]\d{2}[- ]\d{2}"#, options: .regularExpression) {
+            let ata = cleaned[range].replacingOccurrences(of: " ", with: "-")
+            return fallback.isEmpty ? ata : "\(fallback) \(ata)"
+        }
+        if !cleaned.isEmpty, cleaned.lowercased() != "document.pdf" {
+            return fallback.isEmpty ? cleaned : "\(fallback) \(cleaned)"
+        }
+    }
+    return fallback.isEmpty ? "DOCUMENT" : fallback
+}
+
 struct SearchResult: View {
     let session: MVDSession
     let payload: MVDTrainingPayload
@@ -1474,7 +1504,7 @@ struct SearchResult: View {
     @ViewBuilder
     private func safetyDocumentButton(_ title: String, enabled: Bool, rawLink: String, tint: Color) -> some View {
         if enabled, let url = documentURL(from: rawLink) {
-            openDocumentButton(title, url: url, tint: tint)
+            openDocumentButton(mvdActualDocumentTitle(url, fallbackManual: title), url: url, tint: tint)
         }
     }
 
@@ -1544,19 +1574,19 @@ struct SearchResult: View {
                 Text("FIM: \(payload.matMessage.isEmpty ? "—" : payload.matMessage)").foregroundStyle(.secondary)
             }
             if let url = payload.documentURL {
-                openDocumentButton(primaryDocumentTitle, url: url)
+                openDocumentButton(mvdActualDocumentTitle(url, fallbackManual: displayedManual), url: url)
             } else {
                 Label("\(primaryDocumentTitle) — LINK NOT AVAILABLE", systemImage: "link.slash").foregroundStyle(.secondary)
             }
-            safetyDocumentButton(safetyTitle("RII"), enabled: payload.isRii, rawLink: payload.riiLink, tint: .red)
-            safetyDocumentButton(safetyTitle("LMP"), enabled: payload.isLmp, rawLink: payload.lmpLink, tint: .orange)
-            safetyDocumentButton(safetyTitle("ETOPS"), enabled: payload.isEtops, rawLink: payload.etopsLink, tint: .blue)
-            safetyDocumentButton(safetyTitle("RVSM"), enabled: payload.isRvsm == true, rawLink: payload.rvsmLink ?? "", tint: .purple)
-            safetyDocumentButton(safetyTitle("EWIS"), enabled: payload.isEwis, rawLink: payload.ewisLink, tint: .yellow)
-            safetyDocumentButton(safetyTitle("AARD-200"), enabled: aard200Enabled, rawLink: aard200RawLink, tint: .orange)
-            safetyDocumentButton(safetyTitle("AARD-300"), enabled: aard300Enabled, rawLink: aard300RawLink, tint: .orange)
-            safetyDocumentButton(safetyTitle("GPM"), enabled: payload.isGpm, rawLink: payload.gpmLink ?? "", tint: .indigo)
-            safetyDocumentButton(safetyTitle("EO"), enabled: payload.isEo, rawLink: payload.eoLink, tint: .orange)
+            safetyDocumentButton("RII", enabled: payload.isRii, rawLink: payload.riiLink, tint: .red)
+            safetyDocumentButton("LMP", enabled: payload.isLmp, rawLink: payload.lmpLink, tint: .orange)
+            safetyDocumentButton("ETOPS", enabled: payload.isEtops, rawLink: payload.etopsLink, tint: .blue)
+            safetyDocumentButton("RVSM", enabled: payload.isRvsm == true, rawLink: payload.rvsmLink ?? "", tint: .purple)
+            safetyDocumentButton("EWIS", enabled: payload.isEwis, rawLink: payload.ewisLink, tint: .yellow)
+            safetyDocumentButton("AARD-200", enabled: aard200Enabled, rawLink: aard200RawLink, tint: .orange)
+            safetyDocumentButton("AARD-300", enabled: aard300Enabled, rawLink: aard300RawLink, tint: .orange)
+            safetyDocumentButton("GPM", enabled: payload.isGpm, rawLink: payload.gpmLink ?? "", tint: .indigo)
+            safetyDocumentButton("EO", enabled: payload.isEo, rawLink: payload.eoLink, tint: .orange)
             if !qualificationRequirements.isEmpty {
                 Button {
                     showQualificationStatus = true
@@ -2523,6 +2553,7 @@ struct TrainingView: View {
     }
 
     private let manualTypes = ["AMM", "AIPC", "FIM", "CMM", "WDM", "MEL"]
+    private var saveButtonTitle: String { editingPayload == nil ? "ADD MANUAL TO PAYLOAD" : (createNewIndex ? "SAVE AS NEW INDEX" : "SAVE CHANGES") }
 
     private var selectedCMMNumber: String {
         guard selectedManualType.uppercased() == "CMM",
@@ -2572,11 +2603,11 @@ struct TrainingView: View {
                 Section("INDEX PRESERVATION") {
                     Text("INDEX: \(editingPayload.ucid.isEmpty ? editingPayload.recordId : editingPayload.ucid)")
                         .font(.caption.weight(.bold)).foregroundStyle(.purple)
-                    Text("Guardar actualiza este mismo entrenamiento con todas las fotos y documentos presentes.")
+                    Text("Saving updates this record with all current photos and documents.")
                         .font(.caption).foregroundStyle(.secondary)
                     if session.role.uppercased() == "TRAINER" {
                         Toggle("CREATE NEW INDEX", isOn: $createNewIndex)
-                        Text(createNewIndex ? "Se generará un UCID nuevo." : "Se conservarán recordId y UCID actuales.")
+                        Text(createNewIndex ? "A new UCID will be generated." : "The current recordId and UCID will be preserved.")
                             .font(.caption2).foregroundStyle(createNewIndex ? .orange : .green)
                     }
                 }
@@ -2724,7 +2755,7 @@ struct TrainingView: View {
                 }
                 saved = true
             } label: {
-                Label("ADD MANUAL TO PAYLOAD", systemImage: "plus.circle.fill")
+                Label(saveButtonTitle, systemImage: "plus.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -3490,7 +3521,9 @@ private struct AuditTrainingDetailView: View {
         func append(_ label: String, _ raw: String?) {
             let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { return }
-            if !entries.contains(where: { $0.1 == value }) { entries.append((label, value)) }
+            let cleaned = value.replacingOccurrences(of: "\\&", with: "&")
+            let actualLabel = URL(string: cleaned).map { mvdActualDocumentTitle($0, fallbackManual: label) } ?? label
+            if !entries.contains(where: { $0.1 == value }) { entries.append((actualLabel, value)) }
         }
         let primary = payload.trainingProcedureLink.isEmpty ? payload.pinpointLink : payload.trainingProcedureLink
         let manualLabel = [payload.manualType, payload.ataChapter, payload.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: " ")
