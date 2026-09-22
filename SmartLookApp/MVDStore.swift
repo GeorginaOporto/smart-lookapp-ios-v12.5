@@ -447,6 +447,7 @@ final class MVDLocalStore: ObservableObject {
         training.append(contentsOf: snapshot.training)
         routeByTrainingID = snapshot.routes
         audit = makeAuditItems(from: snapshot.training, routes: snapshot.routes)
+        writeAndroidCompatibleIndexes(snapshot)
     }
 
     private func saveCachedTrainingIndex(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
@@ -460,6 +461,66 @@ final class MVDLocalStore: ObservableObject {
         let folder = trainingCacheURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try? data.write(to: trainingCacheURL, options: .atomic)
+    }
+
+    /// Writes Android's canonical mate_master_index.json beside every downloaded model.
+    /// It is rebuilt after an import/update and never replaces the training JSONs.
+    private func writeAndroidCompatibleIndexes(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
+        let grouped = Dictionary(grouping: snapshot.training) { record -> String in
+            let route = snapshot.routes[record.id]
+            return [route?.customer ?? record.customerCode,
+                    route?.manufacturer ?? record.manufacturer,
+                    route?.model ?? record.model]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .joined(separator: "/")
+        }
+        let fileManager = FileManager.default
+        for (key, records) in grouped {
+            let parts = key.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty && $0 != "N/A" }) else { continue }
+            for root in privateTrainingRoots() {
+                let customerRoot = root.appendingPathComponent(parts[0], isDirectory: true)
+                let manufacturerRoot = root.appendingPathComponent(parts[0], isDirectory: true).appendingPathComponent(parts[1], isDirectory: true)
+                let modelRoot = root.appendingPathComponent(parts[0], isDirectory: true).appendingPathComponent(parts[1], isDirectory: true).appendingPathComponent(parts[2], isDirectory: true)
+                guard fileManager.fileExists(atPath: customerRoot.path) || fileManager.fileExists(atPath: manufacturerRoot.path) || fileManager.fileExists(atPath: modelRoot.path) else { continue }
+                try? fileManager.createDirectory(at: modelRoot, withIntermediateDirectories: true)
+
+                var master: [String: Any] = [:]
+                for record in records {
+                    let partName = record.partName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !partName.isEmpty, let documentLink = record.documentURL?.absoluteString, !documentLink.isEmpty else { continue }
+                    let route = snapshot.routes[record.id]
+                    let manual = normalizedManual(route?.manual ?? record.manualType)
+                    guard !manual.isEmpty else { continue }
+                    var component = master[partName] as? [String: Any] ?? [
+                        "partName": partName,
+                        "component": "",
+                        "item": record.item,
+                        "nose": record.aircraftNose,
+                        "description": record.description
+                    ]
+                    let document: [String: Any] = [
+                        "ucid": androidIndex(for: record),
+                        "sourceFile": route?.sourceFileName ?? "",
+                        "documentLink": documentLink,
+                        "labeledName": record.labeledName
+                    ]
+                    if let previous = component[manual] as? [[String: Any]] {
+                        component[manual] = previous + [document]
+                    } else if let previous = component[manual] as? [String: Any] {
+                        component[manual] = [previous, document]
+                    } else {
+                        component[manual] = document
+                    }
+                    master[partName] = component
+                }
+                guard JSONSerialization.isValidJSONObject(master),
+                      let data = try? JSONSerialization.data(withJSONObject: master, options: [.prettyPrinted, .sortedKeys]) else { continue }
+                let indexURL = modelRoot.appendingPathComponent("mate_master_index.json")
+                if let existing = try? Data(contentsOf: indexURL), existing == data { continue }
+                try? data.write(to: indexURL, options: .atomic)
+            }
+        }
     }
 
     /// Metadata-only fingerprint: it does not read image or JSON contents.
@@ -486,7 +547,8 @@ final class MVDLocalStore: ObservableObject {
                 // Changing a thumbs-up must not force a full index rebuild.
                 let sidecarName = url.lastPathComponent.lowercased()
                 guard sidecarName != "_feedback.json",
-                      sidecarName != "_positive_embeddings.jsonl" else { continue }
+                      sidecarName != "_positive_embeddings.jsonl",
+                      sidecarName != "mate_master_index.json" else { continue }
                 let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 let size = values?.fileSize ?? 0
                 let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
@@ -544,7 +606,7 @@ final class MVDLocalStore: ObservableObject {
         for root in roots {
             let pending = root.lastPathComponent.caseInsensitiveCompare("New Trainings") == .orderedSame
             guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
-            for case let url as URL in enumerator where url.pathExtension.lowercased() == "json" {
+            for case let url as URL in enumerator where url.pathExtension.lowercased() == "json" && url.lastPathComponent.caseInsensitiveCompare("mate_master_index.json") != .orderedSame {
                 guard let data = try? Data(contentsOf: url) else { continue }
                 let route = inferredRoute(for: url)
                 // Prefer the Android-compatible adapter for object records. It
@@ -747,6 +809,31 @@ final class MVDLocalStore: ObservableObject {
         return roots
     }
 
+    /// Builds the same readable technical index used by Android MateTextIndex.
+    /// The UCID is the human-facing component index; recordId remains internal.
+    private func androidIndex(for record: MVDTrainingPayload) -> String {
+        let explicit = record.ucid.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !explicit.isEmpty { return explicit.uppercased() }
+
+        let legacy = record.recordId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if legacy.range(of: #"^[A-Z]{2,4}-[A-Z0-9]+-\d{7}$"#, options: .regularExpression) != nil {
+            return legacy.uppercased()
+        }
+
+        let prefix: String
+        switch record.manufacturer.uppercased() {
+        case "BOEING": prefix = "BA"
+        case "AIRBUS": prefix = "AIRB"
+        default: prefix = String(record.manufacturer.uppercased().prefix(3))
+        }
+        let model = record.model.uppercased().split(separator: "-").first.map(String.init) ?? "MODEL"
+        let ataDigits = record.ataChapter.filter(\.isNumber)
+        let ata = ataDigits.isEmpty ? "00" : String(repeating: "0", count: max(0, 2 - ataDigits.count)) + ataDigits
+        let itemValue = record.item.trimmingCharacters(in: .whitespacesAndNewlines)
+        let item = String(repeating: "0", count: max(0, 5 - itemValue.count)) + (itemValue.isEmpty ? "00000" : itemValue)
+        return "\(prefix)-\(model)-\(ata)\(item)"
+    }
+
     private func makeAuditItems(from records: [MVDTrainingPayload], routes: [String: MVDTrainingRoute]) -> [MVDAuditItem] {
         let allowedManuals = Set(["AMM", "AIPC", "WDM", "CMM"])
         return records.compactMap { record in
@@ -759,9 +846,9 @@ final class MVDLocalStore: ObservableObject {
             let title = record.partName.isEmpty
                 ? (record.description.isEmpty ? "Training record" : record.description)
                 : record.partName
-            let identifier = record.recordId.isEmpty ? record.id : record.recordId
+            let identifier = androidIndex(for: record)
             return MVDAuditItem(
-                id: "AUDIT-\(identifier)",
+                id: "AUDIT-\(record.id)",
                 ucid: identifier,
                 title: title,
                 isDone: false,
@@ -1791,6 +1878,7 @@ private struct MVDAndroidTrainingRecord: Decodable {
 
     func asPayload(manualType: String, route: MVDTrainingRoute? = nil) -> MVDTrainingPayload {
         var result = MVDTrainingPayload()
+        result.ucid = ucid ?? recordId ?? ""
         result.recordId = recordId ?? ucid ?? UUID().uuidString
         result.aircraftNose = aircraftNose ?? route?.nose ?? "N/A"
         result.model = model ?? route?.model ?? "N/A"
@@ -1800,6 +1888,7 @@ private struct MVDAndroidTrainingRecord: Decodable {
         result.cmmNumber = route?.cmmNumber ?? ""
         result.ataChapter = ataChapter ?? "N/A"
         result.subAta = subAta ?? ""
+        result.labeledName = labeledName ?? ""
         result.partName = partName ?? labeledName ?? ""
         result.faultCode = faultCode ?? ""
         result.matMessage = matMessage ?? maintMessage ?? maintenanceMessage ?? maintMsg ?? messageCode ?? ""
