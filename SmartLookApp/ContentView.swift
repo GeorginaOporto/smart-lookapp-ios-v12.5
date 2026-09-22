@@ -1789,9 +1789,14 @@ private struct MVDDocumentBrowser: View {
                         },
                         onStateChange: { loading, title, text in
                             isLoading = loading
-                            loadedTitle = title
-                            documentText = text
-                            MVDDocumentSession.shared.update(context: target.context, text: text)
+                            if loading {
+                                loadedTitle = ""
+                                documentText = ""
+                            } else {
+                                if !title.isEmpty { loadedTitle = title }
+                                if !text.isEmpty { documentText = text }
+                            }
+                            if !text.isEmpty { MVDDocumentSession.shared.update(context: target.context, text: text) }
                         }
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -2133,6 +2138,12 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             DispatchQueue.main.async { self.onStateChange(true, "", "") }
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // Hide the blocking loader as soon as the response has committed.
+            // Some portal PDF viewers never produce a readable DOM for didFinish.
+            DispatchQueue.main.async { self.onStateChange(false, webView.title ?? "", "") }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
