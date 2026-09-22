@@ -441,13 +441,74 @@ final class MVDLocalStore: ObservableObject {
         return nil
     }
 
-    private func applyTrainingSnapshot(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
-        let importedIDs = Set(snapshot.training.map(\.id))
-        training.removeAll { importedIDs.contains($0.id) }
-        training.append(contentsOf: snapshot.training)
-        routeByTrainingID = snapshot.routes
-        audit = makeAuditItems(from: snapshot.training, routes: snapshot.routes)
+    private struct MVDLocalTrainingChangeQueue: Codable {
+        var upserts: [MVDTrainingPayload] = []
+        var deletedRecordIDs: [String] = []
+        var deletedUCIDs: [String] = []
+    }
+
+    private var localTrainingChangesURL: URL {
+        trainingCacheURL.deletingLastPathComponent()
+            .appendingPathComponent("training-local-changes.json")
+    }
+
+    private func loadLocalTrainingChanges() -> MVDLocalTrainingChangeQueue {
+        guard let data = try? Data(contentsOf: localTrainingChangesURL),
+              let queue = try? JSONDecoder().decode(MVDLocalTrainingChangeQueue.self, from: data) else {
+            return MVDLocalTrainingChangeQueue()
+        }
+        return queue
+    }
+
+    private func saveLocalTrainingChanges(_ queue: MVDLocalTrainingChangeQueue) {
+        let folder = localTrainingChangesURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(queue) else { return }
+        try? data.write(to: localTrainingChangesURL, options: .atomic)
+    }
+
+    private func routeForLocalPayload(_ payload: MVDTrainingPayload) -> MVDTrainingRoute {
+        MVDTrainingRoute(
+            customer: payload.customerCode,
+            manufacturer: payload.manufacturer,
+            model: payload.model,
+            nose: payload.aircraftNose,
+            manual: payload.manualType,
+            cmmNumber: payload.cmmNumber,
+            ataFolder: payload.ataChapter,
+            sourceFileName: "local-training-\(payload.id).json"
+        )
+    }
+
+    private func persistCurrentTrainingState() {
+        let snapshot = (training: training, routes: routeByTrainingID)
+        audit = makeAuditItems(from: training, routes: routeByTrainingID)
+        saveCachedTrainingIndex(snapshot)
         writeAndroidCompatibleIndexes(snapshot)
+    }
+
+    private func applyTrainingSnapshot(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
+        var mergedTraining = snapshot.training
+        var mergedRoutes = snapshot.routes
+        let queue = loadLocalTrainingChanges()
+        let deletedIDs = Set(queue.deletedRecordIDs)
+        let deletedUCIDs = Set(queue.deletedUCIDs)
+        mergedTraining.removeAll {
+            deletedIDs.contains($0.id) || (!$0.ucid.isEmpty && deletedUCIDs.contains($0.ucid))
+        }
+        for payload in queue.upserts {
+            mergedTraining.removeAll { $0.id == payload.id }
+            mergedTraining.append(payload)
+            mergedRoutes[payload.id] = routeForLocalPayload(payload)
+        }
+        mergedRoutes = mergedRoutes.filter { key, _ in mergedTraining.contains(where: { $0.id == key }) }
+        let importedIDs = Set(mergedTraining.map(\.id))
+        training.removeAll { importedIDs.contains($0.id) }
+        training.append(contentsOf: mergedTraining)
+        routeByTrainingID = mergedRoutes
+        audit = makeAuditItems(from: mergedTraining, routes: mergedRoutes)
+        saveCachedTrainingIndex((training: mergedTraining, routes: mergedRoutes))
+        writeAndroidCompatibleIndexes((training: mergedTraining, routes: mergedRoutes))
     }
 
     private func saveCachedTrainingIndex(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
@@ -1475,17 +1536,81 @@ final class MVDLocalStore: ObservableObject {
     func saveTraining(_ payload: MVDTrainingPayload) {
         training.removeAll { $0.id == payload.id }
         training.append(payload)
+        routeByTrainingID[payload.id] = routeForLocalPayload(payload)
+        pendingTrainingIDs.remove(payload.id)
+
         let folder = MVDTrainingPaths.pendingAircraftFolder(
             model: payload.model,
-            customer: payload.customerCode.isEmpty ? "AA" : payload.customerCode
+            customer: payload.customerCode.isEmpty ? "AA" : payload.customerCode,
+            manufacturer: payload.manufacturer
         ).appendingPathComponent(payload.manualType, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(payload) {
             let name = "training-\(payload.id.replacingOccurrences(of: "/", with: "-"))"
             try? data.write(to: folder.appendingPathComponent(name + ".json"), options: .atomic)
         }
-        hasPreparedPrivateTraining = false
-        loadPrivateTrainingIndex()
+
+        var queue = loadLocalTrainingChanges()
+        queue.upserts.removeAll { $0.id == payload.id }
+        queue.upserts.append(payload)
+        queue.deletedRecordIDs.removeAll { $0 == payload.id }
+        if !payload.ucid.isEmpty { queue.deletedUCIDs.removeAll { $0 == payload.ucid } }
+        saveLocalTrainingChanges(queue)
+        hasPreparedPrivateTraining = true
+        isPreparing = false
+        persistCurrentTrainingState()
+    }
+
+    /// Removes one manual/document record locally and leaves a tombstone so a
+    /// later library scan cannot resurrect it before server synchronization.
+    func deleteTraining(recordId: String) {
+        guard !recordId.isEmpty else { return }
+        training.removeAll { $0.id == recordId }
+        routeByTrainingID.removeValue(forKey: recordId)
+        pendingTrainingIDs.remove(recordId)
+        removePendingTrainingFiles(matching: [recordId])
+        var queue = loadLocalTrainingChanges()
+        queue.upserts.removeAll { $0.id == recordId }
+        if !queue.deletedRecordIDs.contains(recordId) { queue.deletedRecordIDs.append(recordId) }
+        saveLocalTrainingChanges(queue)
+        hasPreparedPrivateTraining = true
+        persistCurrentTrainingState()
+    }
+
+    /// Removes every manual/photo record belonging to the selected index. The
+    /// UCID tombstone also hides the published copy until the server consumes
+    /// the queued deletion.
+    func deleteTrainingIndex(ucid: String, recordId: String? = nil) {
+        let ids = training.filter { record in
+            (!ucid.isEmpty && record.ucid == ucid) || (recordId != nil && record.id == recordId!)
+        }.map(\.id)
+        training.removeAll { ids.contains($0.id) }
+        for id in ids {
+            routeByTrainingID.removeValue(forKey: id)
+            pendingTrainingIDs.remove(id)
+        }
+        removePendingTrainingFiles(matching: ids)
+        var queue = loadLocalTrainingChanges()
+        queue.upserts.removeAll { ids.contains($0.id) }
+        for id in ids where !queue.deletedRecordIDs.contains(id) { queue.deletedRecordIDs.append(id) }
+        if !ucid.isEmpty && !queue.deletedUCIDs.contains(ucid) { queue.deletedUCIDs.append(ucid) }
+        saveLocalTrainingChanges(queue)
+        hasPreparedPrivateTraining = true
+        persistCurrentTrainingState()
+    }
+
+    private func removePendingTrainingFiles(matching ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let fileManager = FileManager.default
+        for root in privateTrainingRoots() where root.lastPathComponent.caseInsensitiveCompare("New Trainings") == .orderedSame {
+            guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
+            for case let url as URL in enumerator where url.pathExtension.caseInsensitiveCompare("json") == .orderedSame {
+                let base = url.deletingPathExtension().lastPathComponent
+                if ids.contains(where: { base.contains($0.replacingOccurrences(of: "/", with: "-")) }) {
+                    try? fileManager.removeItem(at: url)
+                }
+            }
+        }
     }
 
     /// Downloads the published library for the selected fleet and installs it
