@@ -263,6 +263,25 @@ struct MVDLibraryOption: Identifiable, Hashable {
     }
 }
 
+/// Stable Audit identity: the source UCID remains searchable, but different
+/// components/documents that arrived with a reused UCID are shown separately.
+func mvdAuditGroupKey(_ payload: MVDTrainingPayload) -> String {
+    func clean(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: "[^A-Z0-9]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+    let base = clean(payload.ucid.isEmpty ? payload.recordId : payload.ucid)
+    let component = clean(payload.partName.isEmpty
+        ? (payload.labeledName.isEmpty ? (payload.item.isEmpty ? payload.description : payload.item) : payload.labeledName)
+        : payload.partName)
+    let ata = clean([payload.ataChapter, payload.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
+    let cmm = clean(payload.cmmNumber)
+    let location = clean(payload.cmmLocation ?? "")
+    return [base, component, ata, cmm, location].joined(separator: "|")
+}
+
 final class MVDLocalStore: ObservableObject {
     /// Search results must come from private TrainingData imported on the iPad.
     /// Keeping this empty prevents a demo fixture from being presented as a real match.
@@ -897,30 +916,63 @@ final class MVDLocalStore: ObservableObject {
 
     private func makeAuditItems(from records: [MVDTrainingPayload], routes: [String: MVDTrainingRoute]) -> [MVDAuditItem] {
         let allowedManuals = Set(["AMM", "AIPC", "WDM", "CMM"])
-        return records.compactMap { record in
+        var orderedKeys: [String] = []
+        var grouped: [String: [MVDTrainingPayload]] = [:]
+        for record in records {
             let route = routes[record.id]
             let manual = normalizedManual(route?.manual ?? inferredManual(for: record))
-            guard allowedManuals.contains(manual) else { return nil }
-            let ata = [record.ataChapter, record.subAta]
+            guard allowedManuals.contains(manual) else { continue }
+            let key = mvdAuditGroupKey(record)
+            if grouped[key] == nil { orderedKeys.append(key) }
+            grouped[key, default: []].append(record)
+        }
+        var baseCounts: [String: Int] = [:]
+        for key in orderedKeys {
+            let base = key.components(separatedBy: "|").first ?? key
+            baseCounts[base, default: 0] += 1
+        }
+        var baseOrdinals: [String: Int] = [:]
+        return orderedKeys.compactMap { key in
+            guard let group = grouped[key], let representative = group.first else { return nil }
+            let route = routes[representative.id]
+            let manual = normalizedManual(route?.manual ?? inferredManual(for: representative))
+            let base = key.components(separatedBy: "|").first ?? key
+            baseOrdinals[base, default: 0] += 1
+            let indexLabel: String
+            if (baseCounts[base] ?? 0) > 1 {
+                indexLabel = "\(base)-\(String(format: "%02d", baseOrdinals[base] ?? 1))"
+            } else {
+                indexLabel = base
+            }
+            let ata = [representative.ataChapter, representative.subAta]
                 .filter { !$0.isEmpty && $0 != "N/A" }
                 .joined(separator: "-")
-            let title = record.partName.isEmpty
-                ? (record.description.isEmpty ? "Training record" : record.description)
-                : record.partName
-            let identifier = androidIndex(for: record)
+            let title = representative.partName.isEmpty
+                ? (representative.description.isEmpty ? "Training record" : representative.description)
+                : representative.partName
+            var images: [String] = []
+            for record in group {
+                for image in record.imageFiles where !images.contains(image) { images.append(image) }
+            }
+            let manuals = group.compactMap { value -> String? in
+                let itemRoute = routes[value.id]
+                let valueManual = normalizedManual(itemRoute?.manual ?? inferredManual(for: value))
+                let valueATA = [value.ataChapter, value.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-")
+                let ref = [valueManual, valueATA].filter { !$0.isEmpty }.joined(separator: " ")
+                return ref.isEmpty ? nil : ref
+            }.reduce(into: [String]()) { result, value in
+                if !result.contains(value) { result.append(value) }
+            }.joined(separator: " + ")
             return MVDAuditItem(
-                id: "AUDIT-\(record.id)",
-                ucid: identifier,
+                id: "AUDIT-\(representative.id)",
+                ucid: indexLabel,
                 title: title,
                 isDone: false,
-                boeingLink: record.documentURL?.absoluteString ?? "",
-                manualRef: [manual, ata].filter { !$0.isEmpty }.joined(separator: " "),
-                imageFiles: record.imageFiles,
-                originClient: record.customerCode.isEmpty ? (route?.customer ?? "AA") : record.customerCode
+                boeingLink: representative.documentURL?.absoluteString ?? "",
+                manualRef: manuals.isEmpty ? [manual, ata].filter { !$0.isEmpty }.joined(separator: " ") : manuals,
+                imageFiles: images,
+                originClient: representative.customerCode.isEmpty ? (route?.customer ?? "AA") : representative.customerCode
             )
-        }
-        .sorted { lhs, rhs in
-            lhs.manualRef.localizedStandardCompare(rhs.manualRef) == .orderedAscending
         }
     }
 
@@ -1594,6 +1646,25 @@ final class MVDLocalStore: ObservableObject {
         queue.upserts.removeAll { ids.contains($0.id) }
         for id in ids where !queue.deletedRecordIDs.contains(id) { queue.deletedRecordIDs.append(id) }
         if !ucid.isEmpty && !queue.deletedUCIDs.contains(ucid) { queue.deletedUCIDs.append(ucid) }
+        saveLocalTrainingChanges(queue)
+        hasPreparedPrivateTraining = true
+        persistCurrentTrainingState()
+    }
+
+    /// Deletes only the semantic Audit group, not every record that happens
+    /// to reuse the same source UCID.
+    func deleteTrainingGroup(groupKey: String, recordId: String) {
+        let ids = training.filter { mvdAuditGroupKey($0) == groupKey }.map(\.id)
+        if ids.isEmpty { deleteTraining(recordId: recordId); return }
+        training.removeAll { ids.contains($0.id) }
+        for id in ids {
+            routeByTrainingID.removeValue(forKey: id)
+            pendingTrainingIDs.remove(id)
+        }
+        removePendingTrainingFiles(matching: ids)
+        var queue = loadLocalTrainingChanges()
+        queue.upserts.removeAll { ids.contains($0.id) }
+        for id in ids where !queue.deletedRecordIDs.contains(id) { queue.deletedRecordIDs.append(id) }
         saveLocalTrainingChanges(queue)
         hasPreparedPrivateTraining = true
         persistCurrentTrainingState()
