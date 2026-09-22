@@ -2184,8 +2184,8 @@ private struct MVDDocumentWebView: UIViewRepresentable {
                   const controls = Array.from(win.document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"]'));
                   const button = controls.find(node => {
                     if (!visible(node)) return false;
-                    const label = (node.innerText || node.textContent || node.value || node.getAttribute('aria-label') || node.title || '').replace(/\s+/g, ' ').trim();
-                    return /^open\s+(this\s+)?document$/i.test(label);
+                    const label = (node.innerText || node.textContent || node.value || node.getAttribute('aria-label') || node.title || '').replace(/\\s+/g, ' ').trim();
+                    return /^open\\s+(this\\s+)?document$/i.test(label);
                   });
                   if (button) { button.click(); return; }
                 }
