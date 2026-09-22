@@ -1355,34 +1355,76 @@ private struct MailComposeView: UIViewControllerRepresentable {
 
 private func mvdActualDocumentTitle(_ url: URL, fallbackManual: String) -> String {
     let fallback = fallbackManual.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    if let ata = mvdDocumentATA(from: url.absoluteString) {
+        return fallback.isEmpty ? ata : "\(fallback) \(ata)"
+    }
     var candidates: [String] = []
     if let fragment = url.fragment {
         let query = fragment.components(separatedBy: "?").dropFirst().joined(separator: "?")
         if let items = URLComponents(string: "https://smartlookapp.invalid/?" + query)?.queryItems {
             candidates.append(contentsOf: [
-                items.first(where: { $0.name == "documentID" })?.value,
-                items.first(where: { $0.name == "documentTitle" })?.value
+                items.first(where: { $0.name == "documentTitle" })?.value,
+                url.lastPathComponent
             ].compactMap { $0 })
         }
     }
     candidates.append(url.lastPathComponent)
     for raw in candidates {
-        let decoded = raw.removingPercentEncoding ?? raw
-        let suffix = decoded.components(separatedBy: "__").last ?? decoded
-        let cleaned = suffix.replacingOccurrences(of: ".pdf", with: "", options: .caseInsensitive)
+        let decoded = (raw.removingPercentEncoding ?? raw)
+            .components(separatedBy: "__").last ?? raw
+        let cleaned = decoded.replacingOccurrences(of: ".pdf", with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let range = cleaned.range(of: #"\d{2}[- ]\d{2}[- ]\d{2}"#, options: .regularExpression) {
-            let ata = cleaned[range].replacingOccurrences(of: " ", with: "-")
-            return fallback.isEmpty ? ata : "\(fallback) \(ata)"
-        }
-        if !cleaned.isEmpty, cleaned.lowercased() != "document.pdf" {
+        let looksLikeInternalID = cleaned.count > 16 && cleaned.range(of: #"^[A-Z0-9_-]+$"#, options: .regularExpression) != nil
+        if !cleaned.isEmpty, cleaned.lowercased() != "document.pdf", !looksLikeInternalID {
             return fallback.isEmpty ? cleaned : "\(fallback) \(cleaned)"
         }
     }
     return fallback.isEmpty ? "DOCUMENT" : fallback
 }
 
-struct SearchResult: View {
+/// Resolves the Android-compatible local photo layouts used by both the
+/// Audit reel and the Training editor.
+private func mvdResolvedImageCandidates(for payload: MVDTrainingPayload, name: String) -> [URL] {
+    let normalized = name.replacingOccurrences(of: "\\", with: "/")
+    var candidates: [URL] = []
+    if normalized.hasPrefix("/") { candidates.append(URL(fileURLWithPath: normalized)) }
+    let fileName = URL(fileURLWithPath: normalized).lastPathComponent
+    let bases = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        + FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+    for base in bases {
+        for root in [base.appendingPathComponent("New Trainings", isDirectory: true),
+                     base.appendingPathComponent("TrainingData", isDirectory: true)] {
+            let modelRoot = root
+                .appendingPathComponent(payload.customerCode.isEmpty ? "AA" : payload.customerCode, isDirectory: true)
+                .appendingPathComponent(payload.manufacturer, isDirectory: true)
+                .appendingPathComponent(payload.model, isDirectory: true)
+            for folder in [payload.manualType, "SECURE_RESOURCES"] {
+                let folderURL = modelRoot.appendingPathComponent(folder, isDirectory: true)
+                candidates.append(folderURL.appendingPathComponent(normalized))
+                candidates.append(folderURL.appendingPathComponent(fileName))
+            }
+            if !payload.cmmNumber.isEmpty {
+                let cmmRoot = modelRoot.appendingPathComponent("CMM", isDirectory: true)
+                    .appendingPathComponent("cmm\(payload.cmmNumber)", isDirectory: true)
+                candidates.append(cmmRoot.appendingPathComponent(normalized))
+                candidates.append(cmmRoot.appendingPathComponent(fileName))
+            }
+        }
+    }
+    var unique: [URL] = []
+    for url in candidates where !unique.contains(where: { $0.standardizedFileURL.path == url.standardizedFileURL.path }) {
+        unique.append(url)
+    }
+    return unique
+}
+
+private func mvdResolvedImage(for payload: MVDTrainingPayload, name: String) -> UIImage? {
+    mvdResolvedImageCandidates(for: payload, name: name)
+        .compactMap { UIImage(contentsOfFile: $0.path) }
+        .first
+}
+
+struct SearchResultstruct SearchResult: View {
     let session: MVDSession
     let payload: MVDTrainingPayload
     let manual: String
@@ -2563,6 +2605,20 @@ struct TrainingView: View {
         return sameIndex.sorted { $0.manualType.localizedStandardCompare($1.manualType) == .orderedAscending }
     }
 
+    private func editorImage(for name: String) -> UIImage? {
+        guard let editingPayload else { return nil }
+        return mvdResolvedImage(for: editingPayload, name: name)
+    }
+
+    private func documentDisplayTitle(for record: MVDTrainingPayload) -> String {
+        let raw = record.trainingProcedureLink.isEmpty ? record.pinpointLink : record.trainingProcedureLink
+        if let url = URL(string: raw), !raw.isEmpty {
+            return mvdActualDocumentTitle(url, fallbackManual: record.manualType)
+        }
+        let ata = [record.ataChapter, record.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-")
+        return [record.manualType, ata].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
     private let manualTypes = ["AMM", "AIPC", "FIM", "CMM", "WDM", "MEL"]
     private var saveButtonTitle: String { editingPayload == nil ? "ADD MANUAL TO PAYLOAD" : (createNewIndex ? "SAVE AS NEW INDEX" : "SAVE CHANGES") }
 
@@ -2651,8 +2707,19 @@ struct TrainingView: View {
                 } else {
                     ForEach(importedPhotoNames, id: \.self) { name in
                         HStack(spacing: 8) {
-                            Image(systemName: "photo").foregroundStyle(.secondary)
-                            Text(name).font(.caption).foregroundStyle(.secondary)
+                            if let image = editorImage(for: name) {
+                                Image(uiImage: image).resizable().scaledToFill()
+                                    .frame(width: 78, height: 58).clipped().cornerRadius(6)
+                            } else {
+                                Image(systemName: "photo").frame(width: 78, height: 58)
+                                    .foregroundStyle(.secondary)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(name).font(.caption).foregroundStyle(.secondary)
+                                if editorImage(for: name) == nil {
+                                    Text("IMAGE NOT FOUND IN LOCAL LIBRARY").font(.caption2).foregroundStyle(.orange)
+                                }
+                            }
                             Spacer()
                             Button(role: .destructive) {
                                 deletedPhotoNames.insert(name)
@@ -2694,7 +2761,7 @@ struct TrainingView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(record.manualType.isEmpty ? "DOCUMENT" : record.manualType)
                                     .font(.subheadline.weight(.bold))
-                                Text([record.ataChapter, record.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
+                                Text(documentDisplayTitle(for: record))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
