@@ -272,21 +272,43 @@ func mvdAuditGroupKey(_ payload: MVDTrainingPayload) -> String {
             .replacingOccurrences(of: "[^A-Z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
-    let base = clean(payload.ucid.isEmpty ? payload.recordId : payload.ucid)
+    func documentIdentity(_ raw: String) -> String {
+        let cleaned = raw.replacingOccurrences(of: "\\&", with: "&")
+        guard !cleaned.isEmpty else { return "" }
+        if let url = URL(string: cleaned), let fragment = url.fragment,
+           let question = fragment.firstIndex(of: "?") {
+            let query = String(fragment[fragment.index(after: question)...])
+            let items = URLComponents(string: "https://smartlookapp.invalid/?" + query)?.queryItems ?? []
+            let documentID = items.first(where: { $0.name == "documentID" })?.value ?? ""
+            let documentTitle = items.first(where: { $0.name == "documentTitle" })?.value ?? ""
+            let token = [documentID, documentTitle].filter { !$0.isEmpty }.joined(separator: " ")
+            if !token.isEmpty { return clean(token) }
+        }
+        return clean(cleaned)
+    }
     let customer = clean(payload.customerCode)
     let model = clean(payload.model)
-    let nose = clean(payload.aircraftNose)
+    let manualRaw = payload.manualType.isEmpty
+        ? (payload.labeledName.split(separator: " ").first.map(String.init) ?? "")
+        : payload.manualType
+    let manual = clean(manualRaw)
     let component = clean(payload.partName.isEmpty
         ? (payload.labeledName.isEmpty ? (payload.item.isEmpty ? payload.description : payload.item) : payload.labeledName)
         : payload.partName)
-    let ata = clean([payload.ataChapter, payload.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
+    let rawDocument = payload.trainingProcedureLink.isEmpty ? payload.pinpointLink : payload.trainingProcedureLink
+    let ataFallback = clean([payload.ataChapter, payload.subAta]
+        .filter { !$0.isEmpty && $0 != "N/A" }
+        .joined(separator: "-"))
+    let document = documentIdentity(rawDocument)
     let cmm = clean(payload.cmmNumber)
     let location = clean(payload.cmmLocation ?? "")
-    // Keep the UCID first because Audit uses it as the visible index label;
-    // include customer/model/nose so records from different downloaded fleets
-    // or noses can never be merged into one Audit item.
-    return [base, customer, model, nose, component, ata, cmm, location].joined(separator: "|")
+    // Nose and trainer are variants inside one logical Audit index. The
+    // document identity keeps unrelated records with the same component name
+    // separate while allowing 7AA/7AP copies of the same training to merge.
+    return [customer, model, manual, component, document.isEmpty ? ataFallback : document, cmm, location].joined(separator: "|")
 }
+
+
 
 /// Extracts the human ATA from the actual Flatirons document URL.
 /// Internal opaque IDs such as L66ACF... are never used as document labels.
@@ -959,17 +981,23 @@ final class MVDLocalStore: ObservableObject {
             if grouped[key] == nil { orderedKeys.append(key) }
             grouped[key, default: []].append(record)
         }
+        func stableRecordID(_ value: MVDTrainingPayload) -> String {
+            (value.ucid.isEmpty ? value.recordId : value.ucid).uppercased()
+        }
+        var representativeByKey: [String: MVDTrainingPayload] = [:]
         var baseCounts: [String: Int] = [:]
         for key in orderedKeys {
-            let base = key.components(separatedBy: "|").first ?? key
-            baseCounts[base, default: 0] += 1
+            guard let group = grouped[key], let representative = group.sorted(by: { stableRecordID($0).localizedStandardCompare(stableRecordID($1)) == .orderedAscending }).first else { continue }
+            representativeByKey[key] = representative
+            baseCounts[androidIndex(for: representative), default: 0] += 1
         }
         var baseOrdinals: [String: Int] = [:]
         return orderedKeys.compactMap { key in
-            guard let group = grouped[key], let representative = group.first else { return nil }
+            guard let group = grouped[key],
+                  let representative = representativeByKey[key] else { return nil }
             let route = routes[representative.id]
             let manual = normalizedManual(route?.manual ?? inferredManual(for: representative))
-            let base = key.components(separatedBy: "|").first ?? key
+            let base = androidIndex(for: representative)
             baseOrdinals[base, default: 0] += 1
             let indexLabel: String
             if (baseCounts[base] ?? 0) > 1 {
@@ -992,7 +1020,9 @@ final class MVDLocalStore: ObservableObject {
                 let itemRoute = routes[value.id]
                 let valueManual = normalizedManual(itemRoute?.manual ?? inferredManual(for: value))
                 let rawDocument = value.trainingProcedureLink.isEmpty ? value.pinpointLink : value.trainingProcedureLink
-                let valueATA = mvdDocumentATA(from: rawDocument) ?? [value.ataChapter, value.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-")
+                let valueATA = mvdDocumentATA(from: rawDocument) ?? [value.ataChapter, value.subAta]
+                    .filter { !$0.isEmpty && $0 != "N/A" }
+                    .joined(separator: "-")
                 let ref = [valueManual, valueATA].filter { !$0.isEmpty }.joined(separator: " ")
                 return ref.isEmpty ? nil : ref
             }.reduce(into: [String]()) { result, value in
@@ -1010,6 +1040,8 @@ final class MVDLocalStore: ObservableObject {
             )
         }
     }
+
+
 
     /// Folder metadata is authoritative when Android JSON omitted route fields.
     private func apply(route: MVDTrainingRoute, to original: MVDTrainingPayload) -> MVDTrainingPayload {
