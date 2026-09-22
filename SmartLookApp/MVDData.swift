@@ -203,6 +203,9 @@ struct MVDTrainingPayload: Codable, Identifiable {
     var model: String = "N/A"
     var manufacturer: String = "Boeing"
     var customerCode: String = ""
+    /// Trainer/session metadata used by Audit detail; optional for legacy JSON compatibility.
+    var trainerID: String? = ""
+    var cmmLocation: String? = ""
     var manualType: String = "AMM"
     /// Shared CMM document selected from the cabin/seat configuration.
     var cmmNumber: String = ""
