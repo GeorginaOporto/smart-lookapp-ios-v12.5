@@ -1813,6 +1813,8 @@ private struct MVDAndroidTrainingRecord: Decodable {
     let recordId: String?
     let customerCode: String?
     let employeeId: String?
+    let cmmLocation: String?
+    let seat: String?
     let aircraftNose: String?
     let model: String?
     let partName: String?
@@ -1884,6 +1886,8 @@ private struct MVDAndroidTrainingRecord: Decodable {
         result.model = model ?? route?.model ?? "N/A"
         result.manufacturer = route?.manufacturer ?? "Boeing"
         result.customerCode = customerCode ?? route?.customer ?? "AA"
+        result.trainerID = employeeId ?? ""
+        result.cmmLocation = cmmLocation ?? seat ?? ""
         result.manualType = manualType.isEmpty ? (route?.manual ?? "AMM") : manualType.uppercased()
         result.cmmNumber = route?.cmmNumber ?? ""
         result.ataChapter = ataChapter ?? "N/A"
