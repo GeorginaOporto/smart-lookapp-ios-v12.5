@@ -393,7 +393,7 @@ final class MVDLocalStore: ObservableObject {
     func hasTrainingLibrary(customer: String, manufacturer: String, model: String) -> Bool {
         let wanted = [normalized(customer), normalized(manufacturer), normalized(model)]
         let fileManager = FileManager.default
-        for root in privateTrainingRoots() {
+        for root in [FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0], FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]].map({ $0.appendingPathComponent("TrainingData", isDirectory: true).appendingPathComponent(customer, isDirectory: true).appendingPathComponent(manufacturer, isDirectory: true).appendingPathComponent(model, isDirectory: true) }) {
             guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
             for case let url as URL in enumerator {
                 guard url.pathExtension.caseInsensitiveCompare("json") == .orderedSame else { continue }
