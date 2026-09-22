@@ -1370,14 +1370,6 @@ struct SearchResult: View {
         return aard300Enabled ? payload.aadrLink : ""
     }
 
-    // Some legacy Android training records mark RII with isRii=true but store
-    // the Required Inspection Items document in checkLink instead of riiLink.
-    // Keep the explicit RII link authoritative and use checkLink only as the
-    // compatibility fallback for that exact warning.
-    private var riiRawLink: String {
-        payload.riiLink.isEmpty ? payload.checkLink : payload.riiLink
-    }
-
     private var hasSafetyDocument: Bool {
         payload.isRii || payload.isLmp || payload.isEtops || payload.isEwis ||
         payload.isRvsm == true || payload.isAard200 == true || payload.isAard300 == true ||
@@ -1462,7 +1454,7 @@ struct SearchResult: View {
             } else {
                 Label("\(primaryDocumentTitle) — LINK NOT AVAILABLE", systemImage: "link.slash").foregroundStyle(.secondary)
             }
-            safetyDocumentButton(safetyTitle("RII"), enabled: payload.isRii, rawLink: riiRawLink, tint: .red)
+            safetyDocumentButton(safetyTitle("RII"), enabled: payload.isRii, rawLink: payload.riiLink, tint: .red)
             safetyDocumentButton(safetyTitle("LMP"), enabled: payload.isLmp, rawLink: payload.lmpLink, tint: .orange)
             safetyDocumentButton(safetyTitle("ETOPS"), enabled: payload.isEtops, rawLink: payload.etopsLink, tint: .blue)
             safetyDocumentButton(safetyTitle("RVSM"), enabled: payload.isRvsm == true, rawLink: payload.rvsmLink ?? "", tint: .purple)
@@ -1937,45 +1929,7 @@ private struct MVDDocumentWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // The authenticated Flatirons route often stops on its document
-            // cover and renders a yellow "Open Document" control. That
-            // control is the portal's last hand-off to the trained PDF, so
-            // activate it after the sign-in session is already established.
-            // Some portal builds render it asynchronously; retry briefly
-            // instead of requiring a second manual tap.
-            openDocumentControl(in: webView, attempt: 0)
             captureText(from: webView, remainingAttempts: 8)
-        }
-
-        private func openDocumentControl(in webView: WKWebView, attempt: Int) {
-            guard attempt < 10 else { return }
-            let script = """
-            (() => {
-              const visible = node => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)
-                && getComputedStyle(node).visibility !== 'hidden';
-              const text = node => (node.innerText || node.textContent || node.value || '')
-                .replace(/\\s+/g, ' ').trim().toLowerCase();
-              const label = node => ((node.getAttribute('aria-label') || '') + ' '
-                + (node.getAttribute('title') || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
-              const documents = [document];
-              for (const frame of document.querySelectorAll('iframe')) {
-                try { if (frame.contentDocument) documents.push(frame.contentDocument); } catch (_) {}
-              }
-              const control = documents.flatMap(doc => Array.from(
-                doc.querySelectorAll('button,a,[role=button],input')
-              )).filter(visible).find(node => /open\\s+(this\\s+)?document/.test(text(node))
-                || /open\\s+(this\\s+)?document/.test(label(node)));
-              if (!control) return false;
-              control.click();
-              return true;
-            })();
-            """
-            webView.evaluateJavaScript(script) { result, _ in
-                guard !((result as? Bool) ?? false), attempt + 1 < 10 else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                    self.openDocumentControl(in: webView, attempt: attempt + 1)
-                }
-            }
         }
 
         private func captureText(from webView: WKWebView, remainingAttempts: Int) {
@@ -2027,62 +1981,54 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 // No direct viewer navigation occurs after sign-in or acknowledgement.
 private struct MVDExternalCMMDocumentView: View {
     let target: MVDDocumentTarget
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @SceneStorage("mvd_last_external_cmm_url") private var lastOpenedURL = ""
-    @State private var status = "Opening the CMM in Safari…"
-
-    private var targetURLString: String { target.url.absoluteString }
-
-    private func openInSafari() {
-        lastOpenedURL = targetURLString
-        status = "CMM opened in Safari. Return here to keep working with the same search."
-        UIApplication.shared.open(target.url, options: [:])
-    }
+    @AppStorage("mvd_external_cmm_open_url") private var openedURL = ""
+    @State private var launchInProgress = false
+    @State private var returnedFromSafari = false
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "safari")
-                .font(.system(size: 42, weight: .semibold))
-                .foregroundStyle(.blue)
-
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 38))
+                .foregroundStyle(.orange)
             Text("CMM OPENED IN SAFARI")
-                .font(.headline.weight(.black))
-
+                .font(.headline.weight(.bold))
+                .multilineTextAlignment(.center)
             Text(target.title)
-                .font(.subheadline.weight(.semibold))
+                .font(.caption.weight(.semibold))
                 .multilineTextAlignment(.center)
-
-            Text(status)
+            Text(returnedFromSafari ? "Returned from Safari. The current search remains open." : "Safari is opening the selected CMM document.")
                 .font(.caption)
-                .foregroundStyle(scenePhase == .active ? Color.secondary : Color.orange)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-
             Button { openInSafari() } label: {
-                Label("OPEN CMM IN SAFARI", systemImage: "arrow.up.forward.app")
+                Label("OPEN CMM IN SAFARI", systemImage: "safari")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-
-            Button("RETURN TO SEARCH") { dismiss() }
-                .buttonStyle(.bordered)
+            .tint(.orange)
+            .disabled(launchInProgress)
         }
-        .padding(24)
+        .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(MVDTheme.background.ignoresSafeArea())
         .onAppear {
-            // SceneStorage prevents SwiftUI from reopening Safari when the
-            // user returns from it or when the cover is reconstructed.
-            guard lastOpenedURL != targetURLString else {
-                status = "CMM opened in Safari. Return here to keep working with the same search."
-                return
+            if openedURL == target.url.absoluteString {
+                returnedFromSafari = true
+            } else {
+                openedURL = target.url.absoluteString
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { openInSafari() }
             }
-            openInSafari()
         }
         .onChange(of: scenePhase) { phase in
-            if phase == .active, lastOpenedURL == targetURLString {
-                status = "Returned from Safari. The previous search, images and aircraft context remain open."
-            }
+            if phase == .active && openedURL == target.url.absoluteString { returnedFromSafari = true }
+        }
+    }
+
+    private func openInSafari() {
+        guard !launchInProgress else { return }
+        launchInProgress = true
+        UIApplication.shared.open(target.url, options: [:]) { _ in
+            DispatchQueue.main.async { launchInProgress = false }
         }
     }
 }
