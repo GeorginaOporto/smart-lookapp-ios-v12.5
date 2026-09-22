@@ -2167,7 +2167,7 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 
         func openTrainedDocument(in webView: WKWebView) {
             didStartAutoOpen = true
-            let script = `
+            let script = """
             (() => {
               let attempts = 0;
               const visible = node => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length) && getComputedStyle(node).visibility !== 'hidden';
@@ -2193,7 +2193,7 @@ private struct MVDDocumentWebView: UIViewRepresentable {
               };
               tryOpen();
             })();
-            `
+            """
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
