@@ -2558,9 +2558,8 @@ struct TrainingView: View {
 
     private var relatedEditablePayloads: [MVDTrainingPayload] {
         guard let editingPayload else { return [] }
-        let sameIndex = !editingPayload.ucid.isEmpty
-            ? store.training.filter { $0.ucid == editingPayload.ucid }
-            : [editingPayload]
+        let groupKey = mvdAuditGroupKey(editingPayload)
+        let sameIndex = store.training.filter { mvdAuditGroupKey($0) == groupKey }
         return sameIndex.sorted { $0.manualType.localizedStandardCompare($1.manualType) == .orderedAscending }
     }
 
@@ -2770,7 +2769,7 @@ struct TrainingView: View {
             }
             Button {
                 if deleteEntireIndex, let current = editingPayload {
-                    store.deleteTrainingIndex(ucid: current.ucid, recordId: current.recordId)
+                    store.deleteTrainingGroup(groupKey: mvdAuditGroupKey(current), recordId: current.recordId)
                     saved = true
                     dismiss()
                     return
@@ -3594,7 +3593,8 @@ private struct AuditTrainingDetailView: View {
 
     private var records: [MVDTrainingPayload] {
         guard let selected = store.training.first(where: { $0.id == selectedRecordID }) else { return [] }
-        let grouped = selected.ucid.isEmpty ? [] : store.training.filter { $0.ucid == selected.ucid }
+        let groupKey = mvdAuditGroupKey(selected)
+        let grouped = store.training.filter { mvdAuditGroupKey($0) == groupKey }
         return grouped.isEmpty ? [selected] : grouped
     }
 
