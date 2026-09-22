@@ -277,7 +277,7 @@ struct MainShell: View {
                 .presentationDetents([.medium, .large])
             }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             guard phase == .inactive || phase == .background else { return }
             MVDSessionStore.save(session)
         }
@@ -914,7 +914,7 @@ struct SearchView: View {
             )
         }
         .onAppear { restoreLastSearchIfNeeded() }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             guard phase == .inactive || phase == .background else { return }
             persistLastSearch()
         }
@@ -3440,4 +3440,3 @@ private enum MVDTheme {
         endPoint: .bottomTrailing
     )
 }
-
