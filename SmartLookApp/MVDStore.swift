@@ -273,13 +273,19 @@ func mvdAuditGroupKey(_ payload: MVDTrainingPayload) -> String {
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
     let base = clean(payload.ucid.isEmpty ? payload.recordId : payload.ucid)
+    let customer = clean(payload.customerCode)
+    let model = clean(payload.model)
+    let nose = clean(payload.aircraftNose)
     let component = clean(payload.partName.isEmpty
         ? (payload.labeledName.isEmpty ? (payload.item.isEmpty ? payload.description : payload.item) : payload.labeledName)
         : payload.partName)
     let ata = clean([payload.ataChapter, payload.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
     let cmm = clean(payload.cmmNumber)
     let location = clean(payload.cmmLocation ?? "")
-    return [base, component, ata, cmm, location].joined(separator: "|")
+    // Keep the UCID first because Audit uses it as the visible index label;
+    // include customer/model/nose so records from different downloaded fleets
+    // or noses can never be merged into one Audit item.
+    return [base, customer, model, nose, component, ata, cmm, location].joined(separator: "|")
 }
 
 /// Extracts the human ATA from the actual Flatirons document URL.
