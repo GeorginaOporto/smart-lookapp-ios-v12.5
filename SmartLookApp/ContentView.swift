@@ -3790,10 +3790,27 @@ private struct AuditTrainingDetailView: View {
                         ForEach(Array(records.enumerated()), id: \.offset) { _, record in
                             VStack(alignment: .leading, spacing: 7) {
                                 Text("DOCUMENT • \(record.manualType)").sectionTitle()
+                                valueRow("NOSE", record.aircraftNose)
+                                valueRow("TRAINER ID", record.trainerID ?? session.employeeID)
                                 valueRow("ATA", [record.ataChapter, record.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
                                 valueRow("PART / ITEM", record.partName.isEmpty ? record.item : record.partName)
                                 valueRow("PAGE", record.pageNumber)
                                 valueRow("APPLICABILITY", [record.faultCode, record.eicasMessage, record.eicasLevel].filter { !$0.isEmpty }.joined(separator: " • "))
+                                if !record.imageFiles.isEmpty {
+                                    Text("PHOTOS • \(record.aircraftNose)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        HStack(spacing: 8) {
+                                            ForEach(record.imageFiles, id: \.self) { name in
+                                                if let image = imageFor(payload: record, name: name) {
+                                                    Image(uiImage: image).resizable().scaledToFill().frame(width: 96, height: 72).clipped().cornerRadius(7)
+                                                } else {
+                                                    VStack { Image(systemName: "photo"); Text(name).font(.caption2).lineLimit(2) }
+                                                        .frame(width: 96, height: 72).foregroundStyle(.secondary)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 if !record.description.isEmpty { Text(record.description).font(.caption).foregroundStyle(.secondary) }
                                 ForEach(Array(documentEntries(for: record).enumerated()), id: \.offset) { _, entry in
                                     Button { openDocument(entry.1) } label: {
@@ -3893,10 +3910,21 @@ struct AuditView: View {
         return store.audit.filter { item in
             guard item.originClient.uppercased() == client.uppercased() else { return false }
             let recordID = item.id.hasPrefix("AUDIT-") ? String(item.id.dropFirst("AUDIT-".count)) : item.id
-            guard let payload = store.training.first(where: { $0.id == recordID }) else { return false }
-            return normalized(payload.model) == model && normalized(payload.aircraftNose) == nose
+            guard let representative = store.training.first(where: { $0.id == recordID }) else { return false }
+            let groupKey = mvdAuditGroupKey(representative)
+            // The visible Audit item is a logical component/document group.
+            // It remains visible when any contained training variant matches
+            // the selected model and the global nose, even if the first
+            // representative was recorded on another nose.
+            return store.training.contains { payload in
+                mvdAuditGroupKey(payload) == groupKey &&
+                normalized(payload.model) == model &&
+                normalized(payload.aircraftNose) == nose
+            }
         }
     }
+
+
 
     var body: some View {
         List {
