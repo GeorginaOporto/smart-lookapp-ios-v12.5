@@ -33,6 +33,9 @@ private enum MVDSessionStore {
         guard let data = try? JSONEncoder().encode(session) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
 }
 
 private struct MVDSearchSnapshot: Codable {
@@ -89,7 +92,13 @@ struct ContentView: View {
     init() { _session = State(initialValue: MVDSessionStore.load()) }
     var body: some View {
         Group {
-            if let session { MainShell(session: session) }
+            if let session {
+                MainShell(session: session) {
+                    MVDSessionStore.clear()
+                    MVDSearchStateStore.clear()
+                    self.session = nil
+                }
+            }
             else { LoginView { newSession in MVDSessionStore.save(newSession); session = newSession } }
         }
         .preferredColorScheme(.dark)
@@ -231,9 +240,11 @@ struct MainShell: View {
     @StateObject private var store = MVDLocalStore()
     @State private var selectedTab = 0
     @State private var showFleet = false
+    let onSignOff: () -> Void
 
-    init(session: MVDSession) {
+    init(session: MVDSession, onSignOff: @escaping () -> Void) {
         _session = State(initialValue: session)
+        self.onSignOff = onSignOff
         let role = session.role.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         _selectedTab = State(initialValue: ["MECH", "MECHANIC", "MOC"].contains(role) ? 1 : 0)
     }
@@ -247,7 +258,7 @@ struct MainShell: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                AppHeader(session: session) { showFleet = true }
+                AppHeader(session: session, onFleet: { showFleet = true }, onSignOff: onSignOff)
                 TabView(selection: $selectedTab) {
                     if !isMechanic {
                         DashboardView(session: session, store: store, selectedTab: $selectedTab)
@@ -293,6 +304,7 @@ struct MainShell: View {
 struct AppHeader: View {
     let session: MVDSession
     let onFleet: () -> Void
+    let onSignOff: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -325,6 +337,15 @@ struct AppHeader: View {
                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(.blue.opacity(0.5)))
             }
+            Button(action: onSignOff) {
+                Label("SIGN OFF", systemImage: "rectangle.portrait.and.arrow.right")
+                    .font(.system(size: 9, weight: .black))
+                    .frame(width: 82, height: 34)
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+            .accessibilityLabel("SIGN OFF")
+            .accessibilityHint("Closes the current session and returns to login")
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(MVDTheme.background)
@@ -749,10 +770,10 @@ struct SearchView: View {
                             ProgressView().controlSize(.small)
                             Text("SEARCHING…")
                         }
-                        .frame(maxWidth: .infinity)
+                        .frame(width: 150)
                     } else {
                         Label("SEARCH", systemImage: "magnifyingglass")
-                            .frame(maxWidth: .infinity)
+                            .frame(width: 150)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1500,7 +1521,7 @@ struct SearchResult: View {
     private func openDocumentButton(_ title: String, url: URL, tint: Color? = nil) -> some View {
         Button { openDocument(url, title: title) } label: {
             Label(title, systemImage: "safari")
-                .frame(maxWidth: .infinity)
+                .frame(width: 150)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
