@@ -1718,7 +1718,7 @@ private struct MVDDocumentBrowser: View {
     @State private var supplementsAcknowledged = false
 
     private var isCMM: Bool {
-        target.context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "CMM"
+        target.context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().contains("CMM")
     }
 
     /// All manuals use the same two-stage portal flow. CMM starts at the
