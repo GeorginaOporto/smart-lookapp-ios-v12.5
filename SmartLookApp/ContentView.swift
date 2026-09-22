@@ -1577,12 +1577,6 @@ struct SearchResult: View {
 
     private func openDocument(_ url: URL, title: String) {
         let context = documentContext(for: url)
-        if context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "CMM" {
-            // CMM opens directly in the device browser. Do not present an
-            // intermediate SmartLookApp screen or a second OPEN DOCUMENT button.
-            UIApplication.shared.open(url, options: [:])
-            return
-        }
         documentTarget = MVDDocumentTarget(
             title: title, url: url, finalURL: nil,
             context: context
@@ -1716,6 +1710,7 @@ private struct MVDDocumentBrowser: View {
     @State private var pageJumpRequest: MVDPageJumpRequest?
     @State private var portalLoginCompleted = false
     @State private var supplementsAcknowledged = false
+    @State private var manualOpenRequestID: UUID?
 
     private var isCMM: Bool {
         target.context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "CMM"
@@ -1781,6 +1776,17 @@ private struct MVDDocumentBrowser: View {
                             : portalAuthenticationURL,
                         scanRequestID: nil,
                         pageJumpRequest: nil,
+                        portalAuthenticationURL: portalAuthenticationURL,
+                        shouldDetectPortalLogin: !portalLoginCompleted,
+                        autoOpenDocument: portalLoginCompleted && (target.finalURL == nil || supplementsAcknowledged),
+                        openDocumentRequestID: manualOpenRequestID,
+                        onPortalLogin: {
+                            guard !portalLoginCompleted else { return }
+                            portalLoginCompleted = true
+                            isLoading = true
+                            loadedTitle = ""
+                            documentText = ""
+                        },
                         onStateChange: { loading, title, text in
                             isLoading = loading
                             loadedTitle = title
@@ -1804,7 +1810,7 @@ private struct MVDDocumentBrowser: View {
                         Text("PORTAL SIGN-IN REQUIRED")
                             .font(.caption.weight(.black))
                             .foregroundStyle(.orange)
-                        Text("Sign in in the portal above, then open the exact manual in a new tab.")
+                        Text("Sign in above. SmartLookApp will continue to the trained document automatically.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -1814,10 +1820,10 @@ private struct MVDDocumentBrowser: View {
                             loadedTitle = ""
                             documentText = ""
                         } label: {
-                            Label("OPEN DOCUMENT", systemImage: "doc.text.magnifyingglass")
+                            Label("CONTINUE IF ALREADY SIGNED IN", systemImage: "arrow.right.doc")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .tint(.orange)
                     }
                     .padding(.horizontal, 10)
@@ -1850,6 +1856,15 @@ private struct MVDDocumentBrowser: View {
                             .lineLimit(1)
                     }
                     .padding(.horizontal, 10)
+                }
+
+                if !isCMM, portalLoginCompleted, (target.finalURL == nil || supplementsAcknowledged) {
+                    Button { manualOpenRequestID = UUID() } label: {
+                        Label("OPEN DOCUMENT MANUALLY", systemImage: "arrow.up.right.square")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.secondary)
                 }
 
                 if portalLoginCompleted, !loadedTitle.isEmpty {
@@ -1921,9 +1936,16 @@ private struct MVDDocumentWebView: UIViewRepresentable {
     let url: URL
     let scanRequestID: UUID?
     let pageJumpRequest: MVDPageJumpRequest?
+    let portalAuthenticationURL: URL
+    let shouldDetectPortalLogin: Bool
+    let autoOpenDocument: Bool
+    let openDocumentRequestID: UUID?
+    let onPortalLogin: () -> Void
     let onStateChange: (Bool, String, String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onStateChange: onStateChange) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onStateChange: onStateChange, portalAuthenticationURL: portalAuthenticationURL, onPortalLogin: onPortalLogin)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -1947,7 +1969,12 @@ private struct MVDDocumentWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.portalAuthenticationURL = portalAuthenticationURL
+        context.coordinator.shouldDetectPortalLogin = shouldDetectPortalLogin
+        context.coordinator.autoOpenDocument = autoOpenDocument
+        context.coordinator.onPortalLogin = onPortalLogin
         if context.coordinator.lastLoadedURL != url {
+            context.coordinator.didStartAutoOpen = false
             context.coordinator.lastLoadedURL = url
             var request = URLRequest(url: url)
             if url.host?.caseInsensitiveCompare("aa.flatironscloud.com") == .orderedSame {
@@ -1955,6 +1982,10 @@ private struct MVDDocumentWebView: UIViewRepresentable {
                 request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             }
             webView.load(request)
+        }
+        if let openDocumentRequestID, context.coordinator.lastOpenDocumentRequestID != openDocumentRequestID {
+            context.coordinator.lastOpenDocumentRequestID = openDocumentRequestID
+            context.coordinator.openTrainedDocument(in: webView)
         }
         if let scanRequestID, context.coordinator.lastScanRequestID != scanRequestID {
             context.coordinator.lastScanRequestID = scanRequestID
@@ -1968,12 +1999,22 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let onStateChange: (Bool, String, String) -> Void
+        var onPortalLogin: () -> Void
+        var portalAuthenticationURL: URL
+        var shouldDetectPortalLogin = false
+        var autoOpenDocument = false
+        var portalDetectionInProgress = false
+        var didReportPortalLogin = false
+        var didStartAutoOpen = false
+        var lastOpenDocumentRequestID: UUID?
         var lastScanRequestID: UUID?
         var lastPageJumpID: UUID?
         var lastLoadedURL: URL?
 
-        init(onStateChange: @escaping (Bool, String, String) -> Void) {
+        init(onStateChange: @escaping (Bool, String, String) -> Void, portalAuthenticationURL: URL, onPortalLogin: @escaping () -> Void) {
             self.onStateChange = onStateChange
+            self.portalAuthenticationURL = portalAuthenticationURL
+            self.onPortalLogin = onPortalLogin
         }
 
         func scanNextPages(in webView: WKWebView, limit: Int) {
@@ -2096,6 +2137,64 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             captureText(from: webView, remainingAttempts: 8)
+            if shouldDetectPortalLogin && !didReportPortalLogin && !portalDetectionInProgress {
+                portalDetectionInProgress = true
+                detectPortalLogin(in: webView, attempt: 0)
+            }
+            if autoOpenDocument && !didStartAutoOpen {
+                didStartAutoOpen = true
+                openTrainedDocument(in: webView)
+            }
+        }
+
+        private func detectPortalLogin(in webView: WKWebView, attempt: Int) {
+            guard shouldDetectPortalLogin, !didReportPortalLogin, attempt < 180 else {
+                portalDetectionInProgress = false
+                return
+            }
+            webView.evaluateJavaScript("!!document.querySelector('#libraryTree')") { value, _ in
+                if (value as? Bool) == true, self.shouldDetectPortalLogin, !self.didReportPortalLogin {
+                    self.didReportPortalLogin = true
+                    self.portalDetectionInProgress = false
+                    DispatchQueue.main.async { self.onPortalLogin() }
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.detectPortalLogin(in: webView, attempt: attempt + 1)
+                }
+            }
+        }
+
+        func openTrainedDocument(in webView: WKWebView) {
+            didStartAutoOpen = true
+            let script = `
+            (() => {
+              let attempts = 0;
+              const visible = node => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length) && getComputedStyle(node).visibility !== 'hidden';
+              const windows = (win, depth = 0) => {
+                const all = [win];
+                if (depth < 3) for (const frame of win.document.querySelectorAll('iframe')) {
+                  try { if (visible(frame) && frame.contentWindow.document) all.push(...windows(frame.contentWindow, depth + 1)); } catch (_) {}
+                }
+                return all;
+              };
+              const tryOpen = () => {
+                attempts += 1;
+                for (const win of windows(window)) {
+                  const controls = Array.from(win.document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"]'));
+                  const button = controls.find(node => {
+                    if (!visible(node)) return false;
+                    const label = (node.innerText || node.textContent || node.value || node.getAttribute('aria-label') || node.title || '').replace(/\s+/g, ' ').trim();
+                    return /^open\s+(this\s+)?document$/i.test(label);
+                  });
+                  if (button) { button.click(); return; }
+                }
+                if (attempts < 60) window.setTimeout(tryOpen, 750);
+              };
+              tryOpen();
+            })();
+            `
+            webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         private func captureText(from webView: WKWebView, remainingAttempts: Int) {
