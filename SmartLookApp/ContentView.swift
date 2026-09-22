@@ -1768,7 +1768,7 @@ private struct MVDDocumentBrowser: View {
                     // only cookies; opening a second web view can therefore
                     // authenticate successfully but leave CMM at 0/0.
                     if isCMM {
-                        MVDExternalCMMDocumentView(target: target)
+                        MVDCMMPortalView(target: target)
                     } else {
                     MVDDocumentWebView(
                         url: portalLoginCompleted
@@ -2319,13 +2319,13 @@ private struct MVDCMMPortalView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.blue.opacity(0.55)))
 
             Button { openMatch = true } label: {
-                Label("OPEN DOCUMENT", systemImage: "doc.text.magnifyingglass")
+                Label("RETRY OPEN DOCUMENT", systemImage: "doc.text.magnifyingglass")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .tint(.orange)
 
-            Text("Accept Knowledge in the portal first, then press OPEN DOCUMENT to load the trained match link.")
+            Text("After sign-in, SmartLookApp opens the trained CMM automatically. If the portal asks for an acknowledgement, confirm it and use OPEN DOCUMENT to resume.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -2353,7 +2353,9 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         let pageFragment = outer?.fragment ?? ""
         let pageValue = pageFragment.components(separatedBy: "&").first(where: { $0.hasPrefix("page=") })?
             .dropFirst(5)
-        let page = Int(pageValue.map(String.init) ?? "") ?? Int(target.context.pageNumber) ?? 0
+        let linkedPage = Int(pageValue.map(String.init) ?? "") ?? 0
+        let trainedPage = Int(target.context.pageNumber) ?? 0
+        let page = linkedPage > 0 ? linkedPage : trainedPage
         let range = publication.range(of: #"\d{2}-\d{2}-\d{2,4}"#, options: .regularExpression)
         let cmm = range.map { String(publication[$0]) } ?? ""
         var route = original.contains("#/main/goto?") ? original : ""
@@ -2453,8 +2455,10 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               report('Review Important Attachments and press I Acknowledge, then press OPEN DOCUMENT.');
               return;
             }
-            if (phase === 'cmm' && !manualOpen) {
-              report('Knowledge accepted. Press OPEN DOCUMENT to load the trained match link.');
+            if (phase === 'cmm' && !finalNavigationStarted && goal.matchURL) {
+              finalNavigationStarted = true;
+              navigate(goal.matchURL);
+              report('Opening the trained CMM document…');
               return;
             }
             // Pinpoint first renders the IPC Addendum as an HTML shell (welcome/tree/TOC).
