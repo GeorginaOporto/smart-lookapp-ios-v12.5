@@ -2396,6 +2396,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 struct TrainingView: View {
     let session: MVDSession
     @ObservedObject var store: MVDLocalStore
+    private let editingPayload: MVDTrainingPayload?
     @State private var partName = ""
     @State private var faultCode = ""
     @State private var page = ""
@@ -2430,6 +2431,50 @@ struct TrainingView: View {
     @State private var photoStatus = ""
     @State private var extractedText = ""
     @State private var showCamera = false
+    @State private var createNewIndex = false
+    @State private var cmmLocation = ""
+
+    init(session: MVDSession, store: MVDLocalStore, editingPayload: MVDTrainingPayload? = nil) {
+        self.session = session
+        self.store = store
+        self.editingPayload = editingPayload
+        _partName = State(initialValue: editingPayload?.partName ?? "")
+        _faultCode = State(initialValue: editingPayload?.faultCode ?? "")
+        _page = State(initialValue: editingPayload?.pageNumber ?? "")
+        _eicas = State(initialValue: editingPayload?.eicasMessage ?? "")
+        _level = State(initialValue: editingPayload?.eicasLevel ?? "")
+        _description = State(initialValue: editingPayload?.description ?? "")
+        _selectedManualType = State(initialValue: editingPayload?.manualType.isEmpty == false ? editingPayload!.manualType : "AMM")
+        _trainingLink = State(initialValue: editingPayload?.trainingProcedureLink.isEmpty == false ? editingPayload!.trainingProcedureLink : (editingPayload?.pinpointLink ?? ""))
+        _manualAta = State(initialValue: editingPayload?.ataChapter == "N/A" ? "" : (editingPayload?.ataChapter ?? ""))
+        _subAta = State(initialValue: editingPayload?.subAta ?? "")
+        _ocrText = State(initialValue: editingPayload?.eicasMessage ?? "")
+        _rii = State(initialValue: editingPayload?.isRii ?? false)
+        _lmp = State(initialValue: editingPayload?.isLmp ?? false)
+        _etops = State(initialValue: editingPayload?.isEtops ?? false)
+        _rvsm = State(initialValue: editingPayload?.isRvsm ?? false)
+        _ewis = State(initialValue: editingPayload?.isEwis ?? false)
+        _aard200 = State(initialValue: editingPayload?.isAard200 ?? false)
+        _aard300 = State(initialValue: editingPayload?.isAard300 ?? false)
+        _gpm = State(initialValue: editingPayload?.isGpm ?? false)
+        _riiLink = State(initialValue: editingPayload?.riiLink ?? "")
+        _lmpLink = State(initialValue: editingPayload?.lmpLink ?? "")
+        _etopsLink = State(initialValue: editingPayload?.etopsLink ?? "")
+        _rvsmLink = State(initialValue: editingPayload?.rvsmLink ?? "")
+        _ewisLink = State(initialValue: editingPayload?.ewisLink ?? "")
+        _aard200Link = State(initialValue: editingPayload?.aard200Link ?? "")
+        _aard300Link = State(initialValue: editingPayload?.aard300Link ?? "")
+        _gpmLink = State(initialValue: editingPayload?.gpmLink ?? "")
+        _selectedSeat = State(initialValue: editingPayload?.cmmLocation ?? "")
+        _saved = State(initialValue: false)
+        _selectedPhotos = State(initialValue: [])
+        _importedPhotoNames = State(initialValue: editingPayload?.imageFiles ?? [])
+        _photoStatus = State(initialValue: editingPayload == nil ? "" : "Existing training photos loaded.")
+        _extractedText = State(initialValue: editingPayload?.eicasMessage ?? "")
+        _showCamera = State(initialValue: false)
+        _createNewIndex = State(initialValue: false)
+        _cmmLocation = State(initialValue: editingPayload?.cmmLocation ?? "")
+    }
 
     private func importPhotos(_ items: [PhotosPickerItem]) {
         let limited = Array(items.prefix(10))
@@ -2518,13 +2563,25 @@ struct TrainingView: View {
 
     var body: some View {
         Form {
-            Section("AI TRAINING CENTER") {
+            Section(editingPayload == nil ? "AI TRAINING CENTER" : "EDIT TRAINING RECORD") {
                 MVDLogo().frame(width: 72, height: 72)
                 Text("ROOT: Application Support / TrainingData + New Trainings").font(.caption).foregroundStyle(.green)
                 Text("Aircraft: \(session.nose) • \(session.aircraft?.model ?? "B777-300")")
             }
-            Section("EDIT EXISTING DATA") { TextField("PASTE JSON FILENAME TO EDIT", text: .constant("")); Button("LOAD") { } }
-            Section("PHOTO LABELING (MAX 10)") {
+            if let editingPayload {
+                Section("INDEX PRESERVATION") {
+                    Text("INDEX: \(editingPayload.ucid.isEmpty ? editingPayload.recordId : editingPayload.ucid)")
+                        .font(.caption.weight(.bold)).foregroundStyle(.purple)
+                    Text("Guardar actualiza este mismo entrenamiento con todas las fotos y documentos presentes.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if session.role.uppercased() == "TRAINER" {
+                        Toggle("CREATE NEW INDEX", isOn: $createNewIndex)
+                        Text(createNewIndex ? "Se generará un UCID nuevo." : "Se conservarán recordId y UCID actuales.")
+                            .font(.caption2).foregroundStyle(createNewIndex ? .orange : .green)
+                    }
+                }
+            }
+            Section(editingPayload == nil ? "PHOTO LABELING (MAX 10)" : "PHOTOS • ADD OR KEEP EXISTING") {
                 if UIImagePickerController.isSourceTypeAvailable(.camera) {
                     Button { showCamera = true } label: {
                         Label("CAPTURE WITH CAMERA", systemImage: "camera")
@@ -2621,11 +2678,14 @@ struct TrainingView: View {
             Button {
                 guard !trainingLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 store.saveTraining(MVDTrainingPayload(
-                    recordId: "TRAINING-\(session.nose)-\(selectedManualType)-\(UUID().uuidString)",
+                    recordId: (editingPayload != nil && !createNewIndex) ? (editingPayload?.recordId ?? "") : "TRAINING-\(session.nose)-\(selectedManualType)-\(UUID().uuidString)",
+                    ucid: (editingPayload != nil && !createNewIndex) ? (editingPayload?.ucid ?? "") : "",
                     aircraftNose: session.nose,
                     model: session.aircraft?.model ?? "N/A",
                     manufacturer: session.aircraft?.manufacturer ?? "Boeing",
                     customerCode: session.aircraft?.customer ?? "DEMO",
+                    trainerID: session.employeeID,
+                    cmmLocation: selectedSeat,
                     manualType: selectedManualType,
                     cmmNumber: selectedCMMNumber,
                     ataChapter: manualAta.isEmpty ? "N/A" : manualAta,
@@ -2658,8 +2718,10 @@ struct TrainingView: View {
                     description: description.isEmpty ? ocrText : description,
                     imageFiles: importedPhotoNames
                 ))
-                trainingLink = ""
-                page = ""
+                if editingPayload == nil || createNewIndex {
+                    trainingLink = ""
+                    page = ""
+                }
                 saved = true
             } label: {
                 Label("ADD MANUAL TO PAYLOAD", systemImage: "plus.circle.fill")
@@ -3406,10 +3468,167 @@ private struct QualificationStatusWebView: UIViewRepresentable {
 
 // MARK: - Audit
 
+private struct AuditTrainingDetailView: View {
+    let session: MVDSession
+    @ObservedObject var store: MVDLocalStore
+    let item: MVDAuditItem
+    @Environment(\.dismiss) private var dismiss
+    @State private var showEditor = false
+
+    private var selectedRecordID: String {
+        item.id.hasPrefix("AUDIT-") ? String(item.id.dropFirst("AUDIT-".count)) : item.id
+    }
+
+    private var records: [MVDTrainingPayload] {
+        guard let selected = store.training.first(where: { $0.id == selectedRecordID }) else { return [] }
+        let grouped = selected.ucid.isEmpty ? [] : store.training.filter { $0.ucid == selected.ucid }
+        return grouped.isEmpty ? [selected] : grouped
+    }
+
+    private func documentEntries(for payload: MVDTrainingPayload) -> [(String, String)] {
+        var entries: [(String, String)] = []
+        func append(_ label: String, _ raw: String?) {
+            let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return }
+            if !entries.contains(where: { $0.1 == value }) { entries.append((label, value)) }
+        }
+        let primary = payload.trainingProcedureLink.isEmpty ? payload.pinpointLink : payload.trainingProcedureLink
+        let manualLabel = [payload.manualType, payload.ataChapter, payload.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: " ")
+        append(manualLabel.isEmpty ? payload.manualType : manualLabel, primary)
+        append("RII WARNING", payload.riiLink)
+        append("LMP WARNING", payload.lmpLink)
+        append("EWIS WARNING", payload.ewisLink)
+        append("ETOPS WARNING", payload.etopsLink)
+        append("RVSM WARNING", payload.rvsmLink)
+        append("AARD-200 WARNING", payload.aard200Link)
+        append("AARD-300 WARNING", payload.aard300Link)
+        append("GPM WARNING", payload.gpmLink)
+        append("RELATED DOCUMENT", payload.checkLink)
+        append("EO", payload.eoLink)
+        append("AADR", payload.aadrLink)
+        return entries
+    }
+
+    private func openDocument(_ raw: String) {
+        let cleaned = raw.replacingOccurrences(of: "\\&", with: "&")
+        guard let url = URL(string: cleaned) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private func imageURL(for payload: MVDTrainingPayload, name: String) -> URL {
+        MVDTrainingPaths.pendingAircraftFolder(
+            model: payload.model,
+            customer: payload.customerCode.isEmpty ? "AA" : payload.customerCode,
+            manufacturer: payload.manufacturer
+        ).appendingPathComponent(payload.manualType, isDirectory: true).appendingPathComponent(name)
+    }
+
+    private func valueRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).font(.caption.weight(.bold)).foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
+            Text(value.isEmpty ? "—" : value).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.ucid).font(.caption.weight(.black)).foregroundStyle(.purple)
+                        Text(item.title).font(.title3.weight(.bold))
+                        Text("AUDIT TRAINING DETAIL").font(.caption.weight(.bold)).foregroundStyle(.green)
+                    }
+                    .card()
+
+                    if let primary = records.first {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("HEADER").sectionTitle()
+                            valueRow("NOSE", primary.aircraftNose)
+                            valueRow("TRAINER ID", primary.trainerID ?? session.employeeID)
+                            valueRow("FLEET", primary.customerCode.isEmpty ? "AA" : primary.customerCode)
+                            valueRow("MODEL", primary.model)
+                            valueRow("MANUFACTURER", primary.manufacturer)
+                            valueRow("MANUALS", records.map { $0.manualType }.joined(separator: ", "))
+                            if !primary.cmmNumber.isEmpty { valueRow("CMM", primary.cmmNumber) }
+                            if !(primary.cmmLocation ?? "").isEmpty { valueRow("CMM LOCATION", primary.cmmLocation ?? "") }
+                        }
+                        .card()
+
+                        if !primary.imageFiles.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("TRAINING PHOTOS").sectionTitle()
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(primary.imageFiles, id: \.self) { name in
+                                            if let image = UIImage(contentsOfFile: imageURL(for: primary, name: name).path) {
+                                                Image(uiImage: image).resizable().scaledToFill().frame(width: 118, height: 88).clipped().cornerRadius(8)
+                                            } else {
+                                                VStack { Image(systemName: "photo"); Text(name).font(.caption2).lineLimit(2) }
+                                                    .frame(width: 118, height: 88).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .card()
+                        }
+
+                        ForEach(Array(records.enumerated()), id: \.offset) { _, record in
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text("DOCUMENT • \(record.manualType)").sectionTitle()
+                                valueRow("ATA", [record.ataChapter, record.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
+                                valueRow("PART / ITEM", record.partName.isEmpty ? record.item : record.partName)
+                                valueRow("PAGE", record.pageNumber)
+                                valueRow("APPLICABILITY", [record.faultCode, record.eicasMessage, record.eicasLevel].filter { !$0.isEmpty }.joined(separator: " • "))
+                                if !record.description.isEmpty { Text(record.description).font(.caption).foregroundStyle(.secondary) }
+                                ForEach(Array(documentEntries(for: record).enumerated()), id: \.offset) { _, entry in
+                                    Button { openDocument(entry.1) } label: {
+                                        HStack {
+                                            Image(systemName: entry.0.contains("WARNING") ? "exclamationmark.triangle.fill" : "doc.text.fill")
+                                            Text(entry.0).font(.subheadline.weight(.bold))
+                                            Spacer()
+                                            Image(systemName: "arrow.up.right.square")
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(entry.0.contains("WARNING") ? .orange : .green)
+                                }
+                            }
+                            .card()
+                        }
+                    } else {
+                        Text("The selected audit record is no longer present in the local training index.")
+                            .font(.caption).foregroundStyle(.secondary).card()
+                    }
+                }
+                .padding(12)
+            }
+            .scrollContentBackground(.hidden)
+            .background(MVDTheme.background.ignoresSafeArea())
+            .navigationTitle("AUDIT DETAIL")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("CLOSE") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    if records.first != nil { Button("EDIT") { showEditor = true } }
+                }
+            }
+            .sheet(isPresented: $showEditor) {
+                if let primary = records.first {
+                    TrainingView(session: session, store: store, editingPayload: primary)
+                }
+            }
+        }
+    }
+}
+
 struct AuditView: View {
     let session: MVDSession
     @ObservedObject var store: MVDLocalStore
     @State private var client = "AA"
+    @State private var selectedItem: MVDAuditItem?
 
     var body: some View {
         List {
@@ -3420,18 +3639,25 @@ struct AuditView: View {
                 if store.isPreparing {
                     HStack(spacing: 8) {
                         ProgressView()
-                        Text("LOADING AUDIT FROM PRIVATE TRAINING…")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                        Text("LOADING AUDIT FROM PRIVATE TRAINING…").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }
                 } else if store.audit.isEmpty {
-                    Text("No AMM, AIPC, WDM or CMM training records found on this iPad.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("No AMM, AIPC, WDM or CMM training records found on this iPad.").font(.caption).foregroundStyle(.secondary)
                 } else {
                     ForEach(store.audit.filter { $0.originClient.uppercased() == client }) { item in
-                        Button { store.toggleAudit(id: item.id) } label: {
-                            HStack { Text(item.ucid).font(.caption.weight(.bold)).foregroundStyle(.purple); Text(item.title).font(.subheadline); Spacer(); Image(systemName: item.isDone ? "checkmark.square.fill" : "square").foregroundStyle(item.isDone ? .green : .secondary) }
+                        HStack(spacing: 8) {
+                            Button { selectedItem = item } label: {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(item.ucid).font(.caption.weight(.bold)).foregroundStyle(.purple)
+                                    Text(item.title).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            Button { store.toggleAudit(id: item.id) } label: {
+                                Image(systemName: item.isDone ? "checkmark.square.fill" : "square")
+                                    .foregroundStyle(item.isDone ? .green : .secondary)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -3440,6 +3666,9 @@ struct AuditView: View {
         }
         .scrollContentBackground(.hidden)
         .background(MVDTheme.background.ignoresSafeArea())
+        .sheet(item: $selectedItem) { item in
+            AuditTrainingDetailView(session: session, store: store, item: item)
+        }
     }
 }
 
