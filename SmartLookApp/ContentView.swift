@@ -1360,8 +1360,8 @@ private func mvdActualDocumentTitle(_ url: URL, fallbackManual: String) -> Strin
         let query = fragment.components(separatedBy: "?").dropFirst().joined(separator: "?")
         if let items = URLComponents(string: "https://smartlookapp.invalid/?" + query)?.queryItems {
             candidates.append(contentsOf: [
-                items.first(where: { $0.name == "documentTitle" })?.value,
-                items.first(where: { $0.name == "documentID" })?.value
+                items.first(where: { $0.name == "documentID" })?.value,
+                items.first(where: { $0.name == "documentTitle" })?.value
             ].compactMap { $0 })
         }
     }
@@ -2426,6 +2426,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 struct TrainingView: View {
     let session: MVDSession
     @ObservedObject var store: MVDLocalStore
+    @Environment(\.dismiss) private var dismiss
     private let editingPayload: MVDTrainingPayload?
     @State private var partName = ""
     @State private var faultCode = ""
@@ -2463,6 +2464,9 @@ struct TrainingView: View {
     @State private var showCamera = false
     @State private var createNewIndex = false
     @State private var cmmLocation = ""
+    @State private var deletedPhotoNames: Set<String> = []
+    @State private var deletedDocumentIDs: Set<String> = []
+    @State private var deleteEntireIndex = false
 
     init(session: MVDSession, store: MVDLocalStore, editingPayload: MVDTrainingPayload? = nil) {
         self.session = session
@@ -2552,6 +2556,14 @@ struct TrainingView: View {
         photoStatus = "Camera photo staged locally for \(session.nose)."
     }
 
+    private var relatedEditablePayloads: [MVDTrainingPayload] {
+        guard let editingPayload else { return [] }
+        let sameIndex = !editingPayload.ucid.isEmpty
+            ? store.training.filter { $0.ucid == editingPayload.ucid }
+            : [editingPayload]
+        return sameIndex.sorted { $0.manualType.localizedStandardCompare($1.manualType) == .orderedAscending }
+    }
+
     private let manualTypes = ["AMM", "AIPC", "FIM", "CMM", "WDM", "MEL"]
     private var saveButtonTitle: String { editingPayload == nil ? "ADD MANUAL TO PAYLOAD" : (createNewIndex ? "SAVE AS NEW INDEX" : "SAVE CHANGES") }
 
@@ -2601,10 +2613,23 @@ struct TrainingView: View {
             }
             if let editingPayload {
                 Section("INDEX PRESERVATION") {
-                    Text("INDEX: \(editingPayload.ucid.isEmpty ? editingPayload.recordId : editingPayload.ucid)")
-                        .font(.caption.weight(.bold)).foregroundStyle(.purple)
-                    Text("Saving updates this record with all current photos and documents.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("INDEX: \(editingPayload.ucid.isEmpty ? editingPayload.recordId : editingPayload.ucid)")
+                                .font(.caption.weight(.bold)).foregroundStyle(.purple)
+                            Text("Saving updates this record with all current photos and documents.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(role: .destructive) { deleteEntireIndex = true } label: {
+                            Image(systemName: "trash.fill").font(.title3)
+                        }
+                        .accessibilityLabel("DELETE ENTIRE INDEX")
+                    }
+                    if deleteEntireIndex {
+                        Text("The entire index will be deleted when you tap SAVE CHANGES.")
+                            .font(.caption).foregroundStyle(.red)
+                    }
                     if session.role.uppercased() == "TRAINER" {
                         Toggle("CREATE NEW INDEX", isOn: $createNewIndex)
                         Text(createNewIndex ? "A new UCID will be generated." : "The current recordId and UCID will be preserved.")
@@ -2626,7 +2651,20 @@ struct TrainingView: View {
                     Text("Photos remain local to this device in this MVD step.").font(.caption).foregroundStyle(.secondary)
                 } else {
                     ForEach(importedPhotoNames, id: \.self) { name in
-                        Text(name).font(.caption).foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            Image(systemName: "photo").foregroundStyle(.secondary)
+                            Text(name).font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(role: .destructive) {
+                                deletedPhotoNames.insert(name)
+                                importedPhotoNames.removeAll { $0 == name }
+                            } label: { Image(systemName: "trash.fill") }
+                            .accessibilityLabel("DELETE PHOTO \(name)")
+                        }
+                    }
+                    if !deletedPhotoNames.isEmpty {
+                        Text("\(deletedPhotoNames.count) photo(s) marked for deletion.")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                     Text(photoStatus).font(.caption).foregroundStyle(.green)
                     if !extractedText.isEmpty {
@@ -2648,6 +2686,30 @@ struct TrainingView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if editingPayload != nil {
+                Section("DOCUMENTS IN THIS INDEX") {
+                    ForEach(relatedEditablePayloads) { record in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(record.manualType.isEmpty ? "DOCUMENT" : record.manualType)
+                                    .font(.subheadline.weight(.bold))
+                                Text([record.ataChapter, record.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-"))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                deletedDocumentIDs.insert(record.id)
+                            } label: { Image(systemName: "trash.fill") }
+                            .accessibilityLabel("DELETE \(record.manualType) DOCUMENT")
+                        }
+                        .opacity(deletedDocumentIDs.contains(record.id) ? 0.45 : 1)
+                    }
+                    if !deletedDocumentIDs.isEmpty {
+                        Text("Selected documents will be removed from this index when you save.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
             Section("MANUAL DOCUMENT") {
@@ -2707,8 +2769,25 @@ struct TrainingView: View {
                 HStack { TextField("EICAS LEVEL", text: $level); TextField("DESCRIPTION / NOTES", text: $description) }
             }
             Button {
-                guard !trainingLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-                store.saveTraining(MVDTrainingPayload(
+                if deleteEntireIndex, let current = editingPayload {
+                    store.deleteTrainingIndex(ucid: current.ucid, recordId: current.recordId)
+                    saved = true
+                    dismiss()
+                    return
+                }
+                let currentID = editingPayload?.id
+                for id in deletedDocumentIDs where id != currentID {
+                    store.deleteTraining(recordId: id)
+                }
+                if let currentID, deletedDocumentIDs.contains(currentID) {
+                    store.deleteTraining(recordId: currentID)
+                    saved = true
+                    dismiss()
+                    return
+                }
+                if editingPayload == nil && trainingLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
+                let remainingPhotos = importedPhotoNames.filter { !deletedPhotoNames.contains($0) }
+                let updatedPayload = MVDTrainingPayload(
                     recordId: (editingPayload != nil && !createNewIndex) ? (editingPayload?.recordId ?? "") : "TRAINING-\(session.nose)-\(selectedManualType)-\(UUID().uuidString)",
                     ucid: (editingPayload != nil && !createNewIndex) ? (editingPayload?.ucid ?? "") : "",
                     aircraftNose: session.nose,
@@ -2747,8 +2826,11 @@ struct TrainingView: View {
                     rvsmLink: rvsmLink,
                     gpmLink: gpmLink,
                     description: description.isEmpty ? ocrText : description,
-                    imageFiles: importedPhotoNames
-                ))
+                    imageFiles: remainingPhotos
+                )
+                store.saveTraining(updatedPayload)
+                importedPhotoNames = remainingPhotos
+                deletedPhotoNames.removeAll()
                 if editingPayload == nil || createNewIndex {
                     trainingLink = ""
                     page = ""
@@ -3526,8 +3608,7 @@ private struct AuditTrainingDetailView: View {
             if !entries.contains(where: { $0.1 == value }) { entries.append((actualLabel, value)) }
         }
         let primary = payload.trainingProcedureLink.isEmpty ? payload.pinpointLink : payload.trainingProcedureLink
-        let manualLabel = [payload.manualType, payload.ataChapter, payload.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: " ")
-        append(manualLabel.isEmpty ? payload.manualType : manualLabel, primary)
+        append(payload.manualType.isEmpty ? "DOCUMENT" : payload.manualType, primary)
         append("RII WARNING", payload.riiLink)
         append("LMP WARNING", payload.lmpLink)
         append("EWIS WARNING", payload.ewisLink)
@@ -3548,12 +3629,44 @@ private struct AuditTrainingDetailView: View {
         UIApplication.shared.open(url)
     }
 
-    private func imageURL(for payload: MVDTrainingPayload, name: String) -> URL {
-        MVDTrainingPaths.pendingAircraftFolder(
-            model: payload.model,
-            customer: payload.customerCode.isEmpty ? "AA" : payload.customerCode,
-            manufacturer: payload.manufacturer
-        ).appendingPathComponent(payload.manualType, isDirectory: true).appendingPathComponent(name)
+    private func imageCandidates(for payload: MVDTrainingPayload, name: String) -> [URL] {
+        let normalized = name.replacingOccurrences(of: "\\", with: "/")
+        var candidates: [URL] = []
+        if normalized.hasPrefix("/") { candidates.append(URL(fileURLWithPath: normalized)) }
+        let fileName = URL(fileURLWithPath: normalized).lastPathComponent
+        let bases = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            + FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        for base in bases {
+            let roots = [
+                base.appendingPathComponent("New Trainings", isDirectory: true),
+                base.appendingPathComponent("TrainingData", isDirectory: true)
+            ]
+            for root in roots {
+                let modelRoot = root
+                    .appendingPathComponent(payload.customerCode.isEmpty ? "AA" : payload.customerCode, isDirectory: true)
+                    .appendingPathComponent(payload.manufacturer, isDirectory: true)
+                    .appendingPathComponent(payload.model, isDirectory: true)
+                candidates.append(modelRoot.appendingPathComponent(payload.manualType, isDirectory: true).appendingPathComponent(normalized))
+                candidates.append(modelRoot.appendingPathComponent(payload.manualType, isDirectory: true).appendingPathComponent(fileName))
+                candidates.append(modelRoot.appendingPathComponent("SECURE_RESOURCES", isDirectory: true).appendingPathComponent(normalized))
+                candidates.append(modelRoot.appendingPathComponent("SECURE_RESOURCES", isDirectory: true).appendingPathComponent(fileName))
+                if !payload.cmmNumber.isEmpty {
+                    let cmmRoot = modelRoot.appendingPathComponent("CMM", isDirectory: true)
+                        .appendingPathComponent("cmm\(payload.cmmNumber)", isDirectory: true)
+                    candidates.append(cmmRoot.appendingPathComponent(normalized))
+                    candidates.append(cmmRoot.appendingPathComponent(fileName))
+                }
+            }
+        }
+        var unique: [URL] = []
+        for url in candidates where !unique.contains(where: { $0.standardizedFileURL.path == url.standardizedFileURL.path }) {
+            unique.append(url)
+        }
+        return unique
+    }
+
+    private func imageFor(payload: MVDTrainingPayload, name: String) -> UIImage? {
+        imageCandidates(for: payload, name: name).compactMap { UIImage(contentsOfFile: $0.path) }.first
     }
 
     private func valueRow(_ label: String, _ value: String) -> some View {
@@ -3594,7 +3707,7 @@ private struct AuditTrainingDetailView: View {
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 8) {
                                         ForEach(primary.imageFiles, id: \.self) { name in
-                                            if let image = UIImage(contentsOfFile: imageURL(for: primary, name: name).path) {
+                                            if let image = imageFor(payload: primary, name: name) {
                                                 Image(uiImage: image).resizable().scaledToFill().frame(width: 118, height: 88).clipped().cornerRadius(8)
                                             } else {
                                                 VStack { Image(systemName: "photo"); Text(name).font(.caption2).lineLimit(2) }
