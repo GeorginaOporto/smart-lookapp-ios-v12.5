@@ -3841,23 +3841,114 @@ struct AuditView: View {
     let session: MVDSession
     @ObservedObject var store: MVDLocalStore
     @State private var client = "AA"
+    @State private var selectedModel: String
     @State private var selectedItem: MVDAuditItem?
+
+    init(session: MVDSession, store: MVDLocalStore) {
+        self.session = session
+        self.store = store
+        _selectedModel = State(initialValue: session.aircraft?.model ?? "")
+    }
+
+    private var availableModels: [String] {
+        let manifestModels = sampleFleet
+            .filter { $0.customer.uppercased() == client.uppercased() }
+            .map(\.model)
+        let importedModels = store.training
+            .filter { $0.customerCode.isEmpty || $0.customerCode.uppercased() == client.uppercased() }
+            .map(\.model)
+        return Array(Set((manifestModels + importedModels).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0 != "N/A" }))
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private var effectiveModel: String {
+        let value = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? (session.aircraft?.model ?? "") : value
+    }
+
+    private var globalNoseLabel: String {
+        session.nose.isEmpty ? "SELECT NOSE IN HEADER" : session.nose
+    }
+
+    private var indexTitle: String {
+        "INDEX • \(effectiveModel.isEmpty ? "MODEL NOT SELECTED" : effectiveModel) • NOSE \(session.nose)"
+    }
+
+    private var auditSourceLabel: String {
+        let model = effectiveModel.isEmpty ? "model folder" : effectiveModel
+        return "Audit source: downloaded \(model) training library, filtered by global NOSE \(session.nose)."
+    }
+
+    private func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+    }
+
+    private var filteredAuditItems: [MVDAuditItem] {
+        let model = normalized(effectiveModel)
+        let nose = normalized(session.nose)
+        guard !model.isEmpty, model != "N/A", !nose.isEmpty, nose != "N/A", nose != "---" else { return [] }
+        return store.audit.filter { item in
+            guard item.originClient.uppercased() == client.uppercased() else { return false }
+            let recordID = item.id.hasPrefix("AUDIT-") ? String(item.id.dropFirst("AUDIT-".count)) : item.id
+            guard let payload = store.training.first(where: { $0.id == recordID }) else { return false }
+            return normalized(payload.model) == model && normalized(payload.aircraftNose) == nose
+        }
+    }
 
     var body: some View {
         List {
             Section {
-                HStack { Text("AUDIT CHECKLIST").font(.headline.weight(.black)); Spacer(); Picker("Client", selection: $client) { Text("AA").tag("AA") }.labelsHidden() }
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("AUDIT CHECKLIST").font(.headline.weight(.black))
+                        Spacer()
+                        Picker("Client", selection: $client) {
+                            Text("AA").tag("AA")
+                        }
+                        .labelsHidden()
+                    }
+                    Picker("MODEL", selection: $selectedModel) {
+                        Text("SELECT MODEL").tag("")
+                        ForEach(availableModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    HStack(spacing: 6) {
+                        Image(systemName: "airplane.circle.fill").foregroundStyle(.blue)
+                        Text("GLOBAL NOSE: \(globalNoseLabel)")
+                            .font(.caption.weight(.bold))
+                        Spacer()
+                        Text(effectiveModel.isEmpty ? "MODEL REQUIRED" : effectiveModel)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
-            Section("INDEX • PART NAME • DONE") {
+            Section(header: Text(indexTitle)) {
                 if store.isPreparing {
                     HStack(spacing: 8) {
                         ProgressView()
                         Text("LOADING AUDIT FROM PRIVATE TRAINING…").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }
-                } else if store.audit.isEmpty {
-                    Text("No AMM, AIPC, WDM or CMM training records found on this iPad.").font(.caption).foregroundStyle(.secondary)
+                } else if session.nose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.nose == "---" {
+                    Text("Select a NOSE in the global fleet header before building the Audit index.")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if effectiveModel.isEmpty {
+                    Text("Select an aircraft MODEL to build the Audit index.")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if filteredAuditItems.isEmpty {
+                    Text("No AMM, AIPC, WDM or CMM training records found for this MODEL and NOSE.")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    ForEach(store.audit.filter { $0.originClient.uppercased() == client }) { item in
+                    ForEach(filteredAuditItems) { item in
                         HStack(spacing: 8) {
                             Button { selectedItem = item } label: {
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -3875,12 +3966,20 @@ struct AuditView: View {
                     }
                 }
             }
-            Section { Text("Selected aircraft: \(session.nose) • \(session.aircraft?.model ?? "B777-300")").font(.caption).foregroundStyle(.secondary) }
+            Section {
+                Text(auditSourceLabel)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .scrollContentBackground(.hidden)
         .background(MVDTheme.background.ignoresSafeArea())
         .sheet(item: $selectedItem) { item in
             AuditTrainingDetailView(session: session, store: store, item: item)
+        }
+        .onChange(of: session.nose) { newNose in
+            if selectedModel.isEmpty, let model = sampleFleet.first(where: { $0.nose.caseInsensitiveCompare(newNose) == .orderedSame })?.model {
+                selectedModel = model
+            }
         }
     }
 }
