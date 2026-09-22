@@ -1424,7 +1424,7 @@ private func mvdResolvedImage(for payload: MVDTrainingPayload, name: String) -> 
         .first
 }
 
-struct SearchResultstruct SearchResult: View {
+struct SearchResult: View {
     let session: MVDSession
     let payload: MVDTrainingPayload
     let manual: String
