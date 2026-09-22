@@ -282,6 +282,33 @@ func mvdAuditGroupKey(_ payload: MVDTrainingPayload) -> String {
     return [base, component, ata, cmm, location].joined(separator: "|")
 }
 
+/// Extracts the human ATA from the actual Flatirons document URL.
+/// Internal opaque IDs such as L66ACF... are never used as document labels.
+func mvdDocumentATA(from raw: String) -> String? {
+    let cleanedURL = raw.replacingOccurrences(of: "\\&", with: "&")
+    var candidates: [String] = []
+    if let url = URL(string: cleanedURL) {
+        if let fragment = url.fragment {
+            let query = fragment.components(separatedBy: "?").dropFirst().joined(separator: "?")
+            if let items = URLComponents(string: "https://smartlookapp.invalid/?" + query)?.queryItems {
+                candidates.append(contentsOf: [
+                    items.first(where: { $0.name == "documentTitle" })?.value,
+                    url.lastPathComponent,
+                    items.first(where: { $0.name == "documentID" })?.value
+                ].compactMap { $0 })
+            }
+        }
+        candidates.append(url.lastPathComponent)
+    }
+    candidates.append(cleanedURL)
+    for candidate in candidates {
+        let decoded = candidate.removingPercentEncoding ?? candidate
+        guard let range = decoded.range(of: #"\d{2}[- ]\d{2}[- ]\d{2}"#, options: .regularExpression) else { continue }
+        return decoded[range].replacingOccurrences(of: " ", with: "-")
+    }
+    return nil
+}
+
 final class MVDLocalStore: ObservableObject {
     /// Search results must come from private TrainingData imported on the iPad.
     /// Keeping this empty prevents a demo fixture from being presented as a real match.
@@ -944,7 +971,8 @@ final class MVDLocalStore: ObservableObject {
             } else {
                 indexLabel = base
             }
-            let ata = [representative.ataChapter, representative.subAta]
+            let representativeDocument = representative.trainingProcedureLink.isEmpty ? representative.pinpointLink : representative.trainingProcedureLink
+            let ata = mvdDocumentATA(from: representativeDocument) ?? [representative.ataChapter, representative.subAta]
                 .filter { !$0.isEmpty && $0 != "N/A" }
                 .joined(separator: "-")
             let title = representative.partName.isEmpty
@@ -957,7 +985,8 @@ final class MVDLocalStore: ObservableObject {
             let manuals = group.compactMap { value -> String? in
                 let itemRoute = routes[value.id]
                 let valueManual = normalizedManual(itemRoute?.manual ?? inferredManual(for: value))
-                let valueATA = [value.ataChapter, value.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-")
+                let rawDocument = value.trainingProcedureLink.isEmpty ? value.pinpointLink : value.trainingProcedureLink
+                let valueATA = mvdDocumentATA(from: rawDocument) ?? [value.ataChapter, value.subAta].filter { !$0.isEmpty && $0 != "N/A" }.joined(separator: "-")
                 let ref = [valueManual, valueATA].filter { !$0.isEmpty }.joined(separator: " ")
                 return ref.isEmpty ? nil : ref
             }.reduce(into: [String]()) { result, value in
