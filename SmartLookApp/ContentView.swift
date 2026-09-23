@@ -1577,12 +1577,6 @@ struct SearchResult: View {
 
     private func openDocument(_ url: URL, title: String) {
         let context = documentContext(for: url)
-        if context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "CMM" {
-            // CMM opens directly in the device browser. Do not present an
-            // intermediate SmartLookApp screen or a second OPEN DOCUMENT button.
-            UIApplication.shared.open(url, options: [:])
-            return
-        }
         documentTarget = MVDDocumentTarget(
             title: title, url: url, finalURL: nil,
             context: context
@@ -1721,10 +1715,9 @@ private struct MVDDocumentBrowser: View {
         target.context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().contains("CMM")
     }
 
-    /// All manuals use the same two-stage portal flow. CMM starts at the
-    /// Flatirons application entry point, which redirects to PFLogin with a
-    /// fresh flowId; other manuals establish the site's origin first. The
-    /// exact document route is loaded only in a second web view after sign-in.
+    /// Non-CMM manuals establish the site's origin before loading their URL.
+    /// CMMs use the embedded Pinpoint library flow below so the current release
+    /// is selected after sign-in instead of replaying a stale training URL.
     private var portalAuthenticationURL: URL {
         if target.context.manualType.uppercased().contains("CMM") {
             // The Flatirons entry point creates the valid PFLogin flowId.
@@ -1768,12 +1761,8 @@ private struct MVDDocumentBrowser: View {
                 .padding(.horizontal, 10)
 
                 ZStack {
-                    // Keep one WKWebView for both sign-in and the document.
-                    // Flatirons PDF.js also uses in-page/session state, not
-                    // only cookies; opening a second web view can therefore
-                    // authenticate successfully but leave CMM at 0/0.
                     if isCMM {
-                        MVDExternalCMMDocumentView(target: target)
+                        MVDCMMPortalView(target: target)
                     } else {
                     MVDDocumentWebView(
                         url: portalLoginCompleted
@@ -2145,64 +2134,9 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 
 // CMM navigation keeps the portal shell and the trained page as separate goals.
 // No direct viewer navigation occurs after sign-in or acknowledgement.
-private struct MVDExternalCMMDocumentView: View {
-    let target: MVDDocumentTarget
-    @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("mvd_external_cmm_open_url") private var openedURL = ""
-    @State private var launchInProgress = false
-    @State private var returnedFromSafari = false
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 38))
-                .foregroundStyle(.orange)
-            Text("CMM OPENED IN SAFARI")
-                .font(.headline.weight(.bold))
-                .multilineTextAlignment(.center)
-            Text(target.title)
-                .font(.caption.weight(.semibold))
-                .multilineTextAlignment(.center)
-            Text(returnedFromSafari ? "Returned from Safari. The current search remains open." : "Safari is opening the selected CMM document.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Button { openInSafari() } label: {
-                Label("OPEN CMM IN SAFARI", systemImage: "safari")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.orange)
-            .disabled(launchInProgress)
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            if openedURL == target.url.absoluteString {
-                returnedFromSafari = true
-            } else {
-                openedURL = target.url.absoluteString
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { openInSafari() }
-            }
-        }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active && openedURL == target.url.absoluteString { returnedFromSafari = true }
-        }
-    }
-
-    private func openInSafari() {
-        guard !launchInProgress else { return }
-        launchInProgress = true
-        UIApplication.shared.open(target.url, options: [:]) { _ in
-            DispatchQueue.main.async { launchInProgress = false }
-        }
-    }
-}
-
 private struct MVDCMMPortalView: View {
     let target: MVDDocumentTarget
-    @State private var status = "Sign in to American Airlines to open the selected CMM."
-    @State private var openMatch = false
+    @State private var status = "Signing in to Pinpoint and locating the current CMM release…"
 
     var body: some View {
         VStack(spacing: 8) {
@@ -2213,73 +2147,47 @@ private struct MVDCMMPortalView: View {
 
             MVDCMMPortalWebView(
                 target: target,
-                openMatch: openMatch,
                 onStatus: { status = $0 }
             )
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.blue.opacity(0.55)))
-
-            Button { openMatch = true } label: {
-                Label("OPEN DOCUMENT", systemImage: "doc.text.magnifyingglass")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.orange)
-
-            Text("Accept Knowledge in the portal first, then press OPEN DOCUMENT to load the trained match link.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
         }
     }
 }
 
 private struct MVDCMMPortalWebView: UIViewRepresentable {
     let target: MVDDocumentTarget
-    let openMatch: Bool
     let onStatus: (String) -> Void
 
     private var configurationJSON: String {
         let original = target.context.documentURL
         let outer = URLComponents(string: original)
         let nested = outer?.queryItems?.first(where: { $0.name == "file" })?.value
-        let document = URL(string: nested ?? original)
-        let filename = document?.lastPathComponent ?? ""
         let portalQuery = outer?.fragment?.components(separatedBy: "?").dropFirst().joined(separator: "?") ?? ""
         let portalItems = URLComponents(string: "https://aa.flatironscloud.com/?" + portalQuery)?.queryItems ?? []
         let portalTitle = portalItems.first(where: { $0.name == "documentTitle" })?.value
-        let title = portalTitle ?? filename.components(separatedBy: "__").last ?? filename
-        let cleanTitle = title.removingPercentEncoding ?? title
-        let publication = cleanTitle.hasSuffix(".pdf") ? String(cleanTitle.dropLast(4)) : cleanTitle
-        let pageFragment = outer?.fragment ?? ""
-        let pageValue = pageFragment.components(separatedBy: "&").first(where: { $0.hasPrefix("page=") })?
-            .dropFirst(5)
-        let page = Int(pageValue.map(String.init) ?? "") ?? Int(target.context.pageNumber) ?? 0
-        let range = publication.range(of: #"\d{2}-\d{2}-\d{2,4}"#, options: .regularExpression)
-        let cmm = range.map { String(publication[$0]) } ?? ""
-        var route = original.contains("#/main/goto?") ? original : ""
-        if route.isEmpty, !cmm.isEmpty, !publication.isEmpty {
-            let group = String(cmm.prefix(5))
-            let resource = "COMPONENTS/\(group)/\(cmm)/\(publication)"
-            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~/"))
-            route = "https://aa.flatironscloud.com/pinpoint/#/main/goto?resourcePath="
-                + (resource.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")
-        }
-        // Exact portal links verified with the signed-in integrated browser.
-        if cmm == "25-20-82" {
-            route = "https://aa.flatironscloud.com/pinpoint/#/main/goto?library=c8e41757-f55c-43f3-b384-c9f6e79cc4da&publicationID=e7ebba41-59a6-4e3b-9e9a-5474b6769e98&documentID=1293233776__BE%20AEROSPACE%2025-20-82&revision=5&documentTitle=BE%20AEROSPACE%2025-20-82.pdf&newViewer=true"
-        } else if cmm == "25-25-71" {
-            route = "https://aa.flatironscloud.com/pinpoint/#/main/goto?library=f7c4714c-8295-47b6-aa3e-8c959a8cb5ce&publicationID=b5aaf261-fdfd-4928-ab3b-f158c226a58c&documentID=1387798187__BE%20AEROSPACE%2025-25-71&revision=2&documentTitle=BE%20AEROSPACE%2025-25-71.pdf&newViewer=true"
-        } else if cmm == "25-21-25" {
-            route = "https://aa.flatironscloud.com/pinpoint/#/main/goto?library=50e89648-00f8-4b6b-8ef4-8e61d92e69e7&publicationID=ad5fcf63-fced-4aea-92d5-590947380a8b&documentID=-973187066__ELEVATE%2025-21-25&revision=1&documentTitle=ELEVATE%2025-21-25.pdf&newViewer=true"
-        }
-        let is777200 = target.context.model.uppercased().replacingOccurrences(of: " ", with: "-").contains("777-200")
-        let preflight = is777200
-            ? "https://aa.flatironscloud.com/pinpoint/#/main/goto?library=c9c65771-2510-4b78-96a3-1791f5bcf558&publicationID=2afe588a-13ca-4d0b-9c94-27b31261e099&documentID=2102982549__B777-200%20IPC%20Addendum&revision=61&documentTitle=B777-200%20IPC%20Addendum.pdf&newViewer=true"
-            : ""
-        let values: [String: Any] = ["route": route, "preflight": preflight, "page": page,
-                                     "title": publication, "cmm": cmm, "matchURL": original,
-                                     "allowMatch": openMatch]
+        let filename = URL(string: nested ?? original)?.lastPathComponent ?? ""
+        let title = (portalTitle ?? filename.components(separatedBy: "__").last ?? filename)
+            .removingPercentEncoding ?? portalTitle ?? filename
+        let publicationPath = URL(string: nested ?? original)?.path
+            .components(separatedBy: "/").first(where: { $0.range(of: #"^\d+_.+_\d+$"#, options: .regularExpression) != nil }) ?? ""
+        let releaseTitle = publicationPath
+            .replacingOccurrences(of: #"^\d+_"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "_", with: " ")
+            .removingPercentEncoding ?? title
+        let decodedOriginal = original.removingPercentEncoding ?? original
+        let pageRegex = try? NSRegularExpression(pattern: #"(?:[?#&])page=(\d+)"#)
+        let pageMatch = pageRegex?.firstMatch(in: decodedOriginal, range: NSRange(decodedOriginal.startIndex..., in: decodedOriginal))
+        let extractedPage = pageMatch.flatMap { Range($0.range(at: 1), in: decodedOriginal).map { Int(decodedOriginal[$0]) } } ?? 0
+        let page = extractedPage > 0 ? extractedPage : (Int(target.context.pageNumber) ?? 0)
+        let values: [String: Any] = [
+            "ata": target.context.ata,
+            "model": target.context.model,
+            "page": page,
+            "title": title,
+            "publication": releaseTitle
+        ]
         let data = (try? JSONSerialization.data(withJSONObject: values)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
@@ -2295,8 +2203,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         (() => {
           if (location.hostname !== 'aa.flatironscloud.com' || window !== window.top) return;
           const goal = \(configurationJSON);
-          let phase = 'start', navigationAt = Date.now(), completed = false;
-          let lastStatus = '', readySince = 0, finalNavigationStarted = false;
+          let completed = false, lastStatus = '', readySince = 0, lastSelectionAttempt = 0, branchExpansionAt = 0;
           const report = text => {
             if (text === lastStatus) return;
             lastStatus = text;
@@ -2304,6 +2211,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
           };
           const decode = s => { try { return decodeURIComponent(s); } catch (_) { return s; } };
           const normalize = s => decode(decode(s || '')).toLowerCase().replace(/\\s+/g, ' ').trim();
+          const compact = s => normalize(s).replace(/[^a-z0-9]/g, '');
           const visible = n => !!n && !!(n.offsetWidth || n.offsetHeight || n.getClientRects().length)
             && getComputedStyle(n).visibility !== 'hidden';
           const windows = (w, depth = 0) => {
@@ -2316,99 +2224,109 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             }
             return all;
           };
-          const navigate = route => {
-            navigationAt = Date.now(); readySince = 0;
-            // Hash navigation preserves the authenticated Angular portal.
-            location.hash = new URL(route).hash;
+          const modelFamily = () => {
+            const model = compact(goal.model);
+            const match = model.match(/(777|787|767|757|747|737|320|321|319)/);
+            if (!match) return '';
+            return (['320', '321', '319'].includes(match[1]) ? 'a' : 'b') + match[1];
+          };
+          const findPublication = () => {
+            const ata = compact(goal.ata).replace(/[^0-9]/g, '').slice(0, 6);
+            if (ata.length < 4) return { error: 'The training does not contain a complete ATA chapter.' };
+            const links = () => Array.from(document.querySelectorAll('#libraryTree a'));
+            let ataLink = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata);
+            if (!ataLink) {
+              const parent = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata.slice(0, 4));
+              const switcher = parent?.closest('li')?.querySelector(':scope > span[treenode_switch]');
+              if (switcher?.classList.contains('center_close')) {
+                branchExpansionAt = Date.now();
+                switcher.click();
+                return { waiting: 'Expanding ATA ' + goal.ata + ' in the Pinpoint library…' };
+              }
+              if (switcher?.classList.contains('center_open') && branchExpansionAt
+                  && Date.now() - branchExpansionAt < 15000) {
+                return { waiting: 'Loading ATA ' + goal.ata + ' from the Pinpoint library…' };
+              }
+              return { error: 'ATA ' + goal.ata + ' is not listed in the current Pinpoint library.' };
+            }
+            const ataNode = ataLink.closest('li');
+            const switcher = ataNode?.querySelector(':scope > span[treenode_switch]');
+            if (switcher?.classList.contains('center_close')) {
+              branchExpansionAt = Date.now();
+              switcher.click();
+              return { waiting: 'Expanding ATA ' + goal.ata + ' in the Pinpoint library…' };
+            }
+            const family = modelFamily();
+            const expected = compact(goal.publication || goal.title);
+            const children = Array.from(ataNode?.querySelectorAll('ul a') || [])
+              .filter(a => {
+                const label = compact(a.textContent);
+                return label && (!family || label.includes(family));
+              });
+            if (!children.length && branchExpansionAt && Date.now() - branchExpansionAt < 15000) {
+              return { waiting: 'Loading current publications for ATA ' + goal.ata + '…' };
+            }
+            if (!children.length) return { error: 'No current ' + (family || '') + ' publication is listed under ATA ' + goal.ata + '.' };
+            branchExpansionAt = 0;
+            const exact = expected ? children.filter(a => compact(a.textContent).includes(expected)
+              || expected.includes(compact(a.textContent))) : [];
+            const matches = exact.length ? exact : (children.length === 1 ? children : []);
+            if (matches.length !== 1) {
+              return { error: 'More than one current publication matches ATA ' + goal.ata + ' / ' + (family || goal.model) + '. Select the correct publication in Pinpoint.' };
+            }
+            return { link: matches[0] };
           };
           const tick = () => {
             if (completed) return;
             if (!document.querySelector('#libraryTree')) {
-              report('Sign in to American Airlines. The selected CMM and match page are saved.');
+              report('Sign in to American Airlines in the embedded Pinpoint window.');
               return;
             }
-            if (!goal.route) {
-              report('Unable to resolve this CMM portal link. The trained link has been preserved.');
+            const resolved = findPublication();
+            if (resolved.waiting) {
+              report(resolved.waiting);
               return;
             }
-            if (phase === 'start') {
-              phase = goal.preflight ? 'preflight' : 'cmm';
-              navigate(goal.preflight || goal.route);
-              report(phase === 'preflight' ? 'Opening B777-200 IPC Addendum…' : 'Opening selected CMM…');
+            if (resolved.error) {
+              report(resolved.error);
+              return;
+            }
+            const publicationLink = resolved.link;
+            const selected = publicationLink.classList.contains('curSelectedNode');
+            if (!selected && Date.now() - lastSelectionAttempt > 5000) {
+              lastSelectionAttempt = Date.now();
+              publicationLink.click();
+              report('Opening current release: ' + publicationLink.textContent.trim() + '…');
+              return;
+            }
+            if (!selected) {
+              report('Waiting for current CMM release: ' + publicationLink.textContent.trim() + '…');
               return;
             }
             const frames = windows(window);
-            const manualOpen = goal.allowMatch || window.__mvdOpenMatch === true;
-            // OPEN DOCUMENT is an explicit user command. It must win over
-            // stale/duplicated Knowledge nodes left in an iframe.
-            if (phase === 'cmm' && !finalNavigationStarted && manualOpen && goal.matchURL) {
-              finalNavigationStarted = true;
-              navigate(goal.matchURL);
-              report('Opening the trained match page…');
-              return;
-            }
             const barrier = frames.some(w => Array.from(w.document.querySelectorAll('button,a,[role=button],input'))
               .some(n => visible(n) && /^i\\s+acknowledge$/i.test((n.innerText || n.value || n.textContent || '').trim())));
             if (barrier) {
               readySince = 0;
-              report('Review Important Attachments and press I Acknowledge, then press OPEN DOCUMENT.');
+              report('Review Important Attachments and press I Acknowledge to continue.');
               return;
             }
-            if (phase === 'cmm' && !manualOpen) {
-              report('Knowledge accepted. Press OPEN DOCUMENT to load the trained match link.');
-              return;
-            }
-            // Pinpoint first renders the IPC Addendum as an HTML shell (welcome/tree/TOC).
-            // It is not PDF.js yet, so waiting only for PDFViewerApplication leaves the flow on page 0.
-            if (phase === 'preflight') {
-              const portalText = frames.map(w => {
-                try { return normalize((w.document.title || '') + ' ' + (w.document.body ? w.document.body.innerText || '' : '')); }
-                catch (_) { return ''; }
-              }).join(' ');
-              const ipcShellReady = portalText.includes('b777-200 ipc addendum')
-                && (portalText.includes('welcome to pinpoint')
-                    || portalText.includes('table of content')
-                    || portalText.includes('b777-200 ipc addendum.pdf'));
-              if (ipcShellReady) {
-                if (!readySince) { readySince = Date.now(); report('B777-200 IPC Addendum loaded. Checking Important Attachments…'); return; }
-                if (Date.now() - readySince < 1500) return;
-                phase = 'cmm';
-                navigate(goal.route);
-                report('Opening selected CMM…');
-                return;
-              }
-            }
-            const expected = normalize(phase === 'preflight' ? 'B777-200 IPC Addendum' : goal.title);
-            const portalSnapshot = frames.map(w => {
-              try {
-                return normalize((w.document.title || '') + ' ' + w.location.href + ' '
-                  + (w.document.body ? w.document.body.innerText || '' : ''));
-              } catch (_) { return ''; }
-            }).join(' ');
             const viewer = frames.map(w => {
               const app = w.PDFViewerApplication;
               if (!app || !app.pdfDocument || !app.pdfDocument.numPages) return null;
               const identity = normalize((app.url || '') + ' ' + (app.baseUrl || '') + ' ' + w.location.href);
-              // Once the CMM route has been opened, the first valid PDF.js
-              // document is the selected CMM. Its internal title can differ
-              // from the trained title, so do not reject it on a strict match.
-              return phase === 'cmm' || (expected && identity.includes(expected)) ? app : null;
+              const expected = compact(goal.publication || goal.title);
+              return identity && expected && compact(identity).includes(expected) ? app : null;
             }).find(Boolean);
             if (!viewer) {
-              report(Date.now() - navigationAt > 60000
-                ? 'Waiting for the selected document. Complete any portal prompts above; the match page is saved.'
-                : 'Waiting for the selected document and supplements…');
+              report('Waiting for the selected CMM PDF to finish loading…');
               return;
             }
-            // Give asynchronously rendered attachment dialogs time to appear.
             if (!readySince) { readySince = Date.now(); return; }
             if (Date.now() - readySince < 2000) return;
-            if (phase === 'preflight') {
-              phase = 'cmm'; navigate(goal.route); report('Opening selected CMM…'); return;
-            }
             if (!goal.page) { completed = true; report('CMM opened. No numeric match page was stored in this training.'); return; }
             if (goal.page < 1 || goal.page > viewer.pdfDocument.numPages) {
-              report('The trained page is outside this document revision. Check the training link.');
+              report('The trained page is outside the current CMM release. Check the training page number.');
               return;
             }
             if (viewer.page !== goal.page) { viewer.page = goal.page; return; }
@@ -2428,12 +2346,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: WKWebView, context: Context) {
-        context.coordinator.onStatus = onStatus
-        if openMatch {
-            view.evaluateJavaScript("window.__mvdOpenMatch = true;")
-        }
-    }
+    func updateUIView(_ view: WKWebView, context: Context) { context.coordinator.onStatus = onStatus }
 
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         view.stopLoading()
