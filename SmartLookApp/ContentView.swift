@@ -3907,20 +3907,25 @@ struct AuditView: View {
         let model = normalized(effectiveModel)
         let nose = normalized(session.nose)
         guard !model.isEmpty, model != "N/A", !nose.isEmpty, nose != "N/A", nose != "---" else { return [] }
+        // Build the matching group set and record lookup in one linear pass.
+        // The former per-row first/contains scans made Audit rendering O(n²).
+        var matchingGroupKeys = Set<String>()
+        var groupKeyByRecordID: [String: String] = [:]
+        for payload in store.training {
+            let groupKey = mvdAuditGroupKey(payload)
+            groupKeyByRecordID[payload.id] = groupKey
+            if normalized(payload.model) == model && normalized(payload.aircraftNose) == nose {
+                matchingGroupKeys.insert(groupKey)
+            }
+        }
         return store.audit.filter { item in
             guard item.originClient.uppercased() == client.uppercased() else { return false }
             let recordID = item.id.hasPrefix("AUDIT-") ? String(item.id.dropFirst("AUDIT-".count)) : item.id
-            guard let representative = store.training.first(where: { $0.id == recordID }) else { return false }
-            let groupKey = mvdAuditGroupKey(representative)
-            // The visible Audit item is a logical component/document group.
-            // It remains visible when any contained training variant matches
-            // the selected model and the global nose, even if the first
-            // representative was recorded on another nose.
-            return store.training.contains { payload in
-                mvdAuditGroupKey(payload) == groupKey &&
-                normalized(payload.model) == model &&
-                normalized(payload.aircraftNose) == nose
-            }
+            guard let groupKey = groupKeyByRecordID[recordID] else { return false }
+            // A logical group stays visible if any contained variant matches
+            // the selected model and global NOSE, even if its representative
+            // was trained on a different NOSE.
+            return matchingGroupKeys.contains(groupKey)
         }
     }
 

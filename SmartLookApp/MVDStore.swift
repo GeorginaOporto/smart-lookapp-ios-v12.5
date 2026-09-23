@@ -369,7 +369,7 @@ final class MVDLocalStore: ObservableObject {
             if let snapshot = self.loadCachedTrainingIndex() {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.applyTrainingSnapshot(snapshot)
+                    self.applyTrainingSnapshot(snapshot, writeCompatibilityIndexes: false)
                     self.hasPreparedPrivateTraining = true
                 }
             } else {
@@ -454,14 +454,21 @@ final class MVDLocalStore: ObservableObject {
             // The cache is invalidated by a local training-file/archive
             // signature. This avoids decoding and hydrating the whole library
             // on every app launch while still picking up a new import.
-            let snapshot = self.loadCachedTrainingIndex() ?? {
+            let cached = self.loadCachedTrainingIndex()
+            let snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute], audit: [MVDAuditItem]?)
+            let shouldWriteCompatibilityIndexes: Bool
+            if let cached {
+                snapshot = cached
+                shouldWriteCompatibilityIndexes = false
+            } else {
                 let fresh = self.buildPrivateTrainingIndex()
                 self.saveCachedTrainingIndex(fresh)
-                return fresh
-            }()
+                snapshot = (training: fresh.training, routes: fresh.routes, audit: nil)
+                shouldWriteCompatibilityIndexes = true
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.applyTrainingSnapshot(snapshot)
+                self.applyTrainingSnapshot(snapshot, writeCompatibilityIndexes: shouldWriteCompatibilityIndexes)
                 self.hasPreparedPrivateTraining = true
                 self.isPreparing = false
             }
@@ -473,6 +480,9 @@ final class MVDLocalStore: ObservableObject {
         let signature: String
         let training: [MVDTrainingPayload]
         let routes: [String: MVDTrainingRoute]
+        // Keep the derived Audit rows alongside their source library so they
+        // are reused on app launches and rebuilt only when that library changes.
+        let audit: [MVDAuditItem]?
     }
 
     // Version 3 moves the index cache out of Application Support so an IPA
@@ -503,14 +513,14 @@ final class MVDLocalStore: ObservableObject {
             .appendingPathComponent("TrainingData", isDirectory: true)
     }
 
-    private func loadCachedTrainingIndex() -> (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])? {
+    private func loadCachedTrainingIndex() -> (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute], audit: [MVDAuditItem]?)? {
         let candidates = [trainingCacheURL, legacyTrainingCacheURL]
         for candidate in candidates {
             guard let data = try? Data(contentsOf: candidate),
                   let cache = try? JSONDecoder().decode(TrainingIndexCache.self, from: data),
                   cache.schemaVersion == Self.trainingIndexSchemaVersion,
                   cache.signature == trainingSourceSignature() else { continue }
-            return (cache.training, cache.routes)
+            return (cache.training, cache.routes, cache.audit)
         }
         return nil
     }
@@ -557,11 +567,14 @@ final class MVDLocalStore: ObservableObject {
     private func persistCurrentTrainingState() {
         let snapshot = (training: training, routes: routeByTrainingID)
         audit = makeAuditItems(from: training, routes: routeByTrainingID)
-        saveCachedTrainingIndex(snapshot)
+        saveCachedTrainingIndex(snapshot, audit: audit)
         writeAndroidCompatibleIndexes(snapshot)
     }
 
-    private func applyTrainingSnapshot(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
+    private func applyTrainingSnapshot(
+        _ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute], audit: [MVDAuditItem]?),
+        writeCompatibilityIndexes: Bool = true
+    ) {
         var mergedTraining = snapshot.training
         var mergedRoutes = snapshot.routes
         let queue = loadLocalTrainingChanges()
@@ -580,17 +593,28 @@ final class MVDLocalStore: ObservableObject {
         training.removeAll { importedIDs.contains($0.id) }
         training.append(contentsOf: mergedTraining)
         routeByTrainingID = mergedRoutes
-        audit = makeAuditItems(from: mergedTraining, routes: mergedRoutes)
-        saveCachedTrainingIndex((training: mergedTraining, routes: mergedRoutes))
-        writeAndroidCompatibleIndexes((training: mergedTraining, routes: mergedRoutes))
+        // Old cache versions have no Audit payload; build it once, then persist
+        // it. A subsequent launch restores these exact logical groups directly.
+        audit = snapshot.audit ?? makeAuditItems(from: mergedTraining, routes: mergedRoutes)
+        let mergedSnapshot = (training: mergedTraining, routes: mergedRoutes)
+        saveCachedTrainingIndex(mergedSnapshot, audit: audit)
+        // The Android-compatible index is a library artifact, not startup work.
+        // Regenerate it only after a new library was actually indexed.
+        if writeCompatibilityIndexes {
+            writeAndroidCompatibleIndexes(mergedSnapshot)
+        }
     }
 
-    private func saveCachedTrainingIndex(_ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute])) {
+    private func saveCachedTrainingIndex(
+        _ snapshot: (training: [MVDTrainingPayload], routes: [String: MVDTrainingRoute]),
+        audit: [MVDAuditItem]? = nil
+    ) {
         let cache = TrainingIndexCache(
             schemaVersion: Self.trainingIndexSchemaVersion,
             signature: trainingSourceSignature(),
             training: snapshot.training,
-            routes: snapshot.routes
+            routes: snapshot.routes,
+            audit: audit
         )
         guard let data = try? JSONEncoder().encode(cache) else { return }
         let folder = trainingCacheURL.deletingLastPathComponent()
