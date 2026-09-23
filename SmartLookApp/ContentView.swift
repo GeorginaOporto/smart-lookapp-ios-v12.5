@@ -2239,21 +2239,14 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const ata = compact(goal.ata).replace(/[^0-9]/g, '').slice(0, 6);
             if (ata.length < 4) return { error: 'The training does not contain a complete ATA chapter.' };
             const links = () => Array.from(document.querySelectorAll('#libraryTree a'));
+            // Pinpoint's library tree commonly exposes only the chapter-level
+            // node (e.g. 25-20), while training stores the full sub-ATA
+            // (25-20-82). Use that chapter as the publication search scope.
             let ataLink = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata);
             if (!ataLink) {
-              const parent = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata.slice(0, 4));
-              const switcher = parent?.closest('li')?.querySelector(':scope > span[treenode_switch]');
-              if (switcher?.classList.contains('center_close')) {
-                branchExpansionAt = Date.now();
-                switcher.click();
-                return { waiting: 'Expanding ATA ' + goal.ata + ' in the Pinpoint library…' };
-              }
-              if (switcher?.classList.contains('center_open') && branchExpansionAt
-                  && Date.now() - branchExpansionAt < 15000) {
-                return { waiting: 'Loading ATA ' + goal.ata + ' from the Pinpoint library…' };
-              }
-              return { error: 'ATA ' + goal.ata + ' is not listed in the current Pinpoint library.' };
+              ataLink = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata.slice(0, 4));
             }
+            if (!ataLink) return { error: 'ATA chapter ' + goal.ata.slice(0, 5) + ' is not listed in the current Pinpoint library.' };
             const ataNode = ataLink.closest('li');
             const switcher = ataNode?.querySelector(':scope > span[treenode_switch]');
             if (switcher?.classList.contains('center_close')) {
@@ -2271,7 +2264,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             if (!children.length && branchExpansionAt && Date.now() - branchExpansionAt < 15000) {
               return { waiting: 'Loading current publications for ATA ' + goal.ata + '…' };
             }
-            if (!children.length) return { error: 'No current ' + (family || '') + ' publication is listed under ATA ' + goal.ata + '.' };
+            if (!children.length) return { error: 'No current ' + (family || '') + ' publication is listed under ATA chapter ' + goal.ata.slice(0, 5) + '.' };
             branchExpansionAt = 0;
             const exact = expected ? children.filter(a => compact(a.textContent).includes(expected)
               || expected.includes(compact(a.textContent))) : [];
