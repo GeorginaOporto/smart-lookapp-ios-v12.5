@@ -1551,8 +1551,19 @@ struct SearchResult: View {
     }
 
     private func documentURL(from raw: String) -> URL? {
-        guard let match = raw.range(of: #"https?://[^\s)\]]+"#, options: .regularExpression) else { return nil }
-        return URL(string: String(raw[match]).replacingOccurrences(of: "\\&", with: "&"))
+        let markdownDestination = raw.range(of: #"\]\(https?://[^)\s]+\)"#, options: .regularExpression)
+        let candidate: String
+        if let markdownDestination {
+            candidate = String(raw[markdownDestination].dropFirst(2).dropLast())
+        } else if let plainURL = raw.range(of: #"https?://[^\s)\]]+"#, options: .regularExpression) {
+            candidate = String(raw[plainURL])
+        } else {
+            return nil
+        }
+        let unescaped = candidate
+            .replacingOccurrences(of: "\\_", with: "_")
+            .replacingOccurrences(of: "\\&", with: "&")
+        return URL(string: unescaped)
     }
 
     private func documentContext(for url: URL) -> MVDDocumentContext {
@@ -1710,33 +1721,20 @@ private struct MVDDocumentBrowser: View {
     @State private var pageJumpRequest: MVDPageJumpRequest?
     @State private var portalLoginCompleted = false
     @State private var supplementsAcknowledged = false
-    @State private var cmmPortalStatus = "Signing in to Pinpoint and locating the current CMM release…"
-    @State private var cmmContinueRequestID: UUID?
+    @State private var cmmPortalStatus = "Sign in to American Airlines / Pinpoint first."
 
     private var isCMM: Bool {
         target.context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().contains("CMM")
     }
 
-    private var shouldShowCMMOpenButton: Bool {
-        let status = cmmPortalStatus.lowercased()
-        return isCMM
-            && !status.contains("cmm opened at match page")
-            && !status.contains("cmm opened. no numeric match page")
-            && (status.contains("opening current release")
-                || status.contains("acknowledge")
-                || status.contains("selected cmm pdf")
-                || status.contains("outside the current cmm release"))
-    }
-
-    /// Non-CMM manuals establish the site's origin before loading their URL.
-    /// CMMs use the embedded Pinpoint library flow below so the current release
-    /// is selected after sign-in instead of replaying a stale training URL.
+    /// Start CMM navigation at Pinpoint so its own authentication redirect can
+    /// establish the session before the trained document URL is requested.
     private var portalAuthenticationURL: URL {
         if target.context.manualType.uppercased().contains("CMM") {
             // The Flatirons entry point creates the valid PFLogin flowId.
             // Loading the bare PFLogin home or a stale /loginb2e flowId only
             // shows the welcome page or an error.
-            return URL(string: "https://aa.flatironscloud.com/")!
+            return URL(string: "https://aa.flatironscloud.com/pinpoint/")!
         }
         guard var components = URLComponents(url: target.url, resolvingAgainstBaseURL: false) else {
             return target.url
@@ -1775,23 +1773,12 @@ private struct MVDDocumentBrowser: View {
 
                 ZStack {
                     if isCMM {
-                        MVDCMMPortalView(target: target, status: $cmmPortalStatus, continueRequestID: cmmContinueRequestID)
-                            .overlay {
-                                if shouldShowCMMOpenButton {
-                                    Button {
-                                        cmmContinueRequestID = UUID()
-                                        cmmPortalStatus = "Continuing to the trained CMM document…"
-                                    } label: {
-                                        Text("OPEN DOC")
-                                            .font(.headline.weight(.bold))
-                                            .frame(width: 142, height: 48)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.blue)
-                                    .shadow(radius: 8)
-                                    .accessibilityHint("Continues through the CMM acknowledgement to the trained page")
-                                }
-                            }
+                        MVDCMMPortalView(
+                            target: target,
+                            initialURL: portalAuthenticationURL,
+                            status: $cmmPortalStatus,
+                            portalLoginCompleted: $portalLoginCompleted
+                        )
                     } else {
                     MVDDocumentWebView(
                         url: portalLoginCompleted
@@ -2161,12 +2148,16 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 }
 
 
-// CMM navigation keeps the portal shell and the trained page as separate goals.
-// No direct viewer navigation occurs after sign-in or acknowledgement.
+// Keep the trained CMM link and its page fragment intact in one authenticated
+// WKWebView. Android hands this same link to ACTION_VIEW; the browser follows
+// sign-in, acknowledgement, redirects, and the final page navigation.
 private struct MVDCMMPortalView: View {
     let target: MVDDocumentTarget
+    let initialURL: URL
     @Binding var status: String
-    let continueRequestID: UUID?
+    @Binding var portalLoginCompleted: Bool
+    @State private var continueRequestID: UUID?
+    @State private var cmmLinkOpened = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -2174,217 +2165,75 @@ private struct MVDCMMPortalView: View {
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
 
             MVDCMMPortalWebView(
                 target: target,
+                initialURL: initialURL,
+                cmmLinkOpened: cmmLinkOpened,
                 continueRequestID: continueRequestID,
-                onStatus: { status = $0 }
+                onStatus: { newStatus in
+                    status = newStatus
+                    if newStatus == "Pinpoint is ready. Tap OPEN CMM to load the trained document." {
+                        portalLoginCompleted = true
+                    }
+                }
             )
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.blue.opacity(0.55)))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Button {
+                if cmmLinkOpened {
+                    status = "Opening the trained CMM page again after acknowledgement…"
+                } else {
+                    status = "Opening the trained CMM document in Pinpoint…"
+                    cmmLinkOpened = true
+                }
+                continueRequestID = UUID()
+            } label: {
+                Text(cmmLinkOpened ? "OPEN TRAINED PAGE" : "OPEN CMM")
+                    .font(.headline.weight(.bold))
+                    .frame(minWidth: 142, minHeight: 48)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .accessibilityHint(cmmLinkOpened
+                ? "After manually accepting I Acknowledge, opens the exact trained CMM page"
+                : "After signing in, opens the trained CMM document")
+            .disabled(!cmmLinkOpened && status != "Pinpoint is ready. Tap OPEN CMM to load the trained document.")
+            Text(cmmLinkOpened
+                 ? "If Pinpoint asks, press I Acknowledge in the document above, then tap OPEN TRAINED PAGE."
+                 : "Sign in above first, wait for Pinpoint to finish loading, then tap OPEN CMM.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Text(target.url.absoluteString)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
         }
     }
 }
 
 private struct MVDCMMPortalWebView: UIViewRepresentable {
     let target: MVDDocumentTarget
+    let initialURL: URL
+    let cmmLinkOpened: Bool
     let continueRequestID: UUID?
     let onStatus: (String) -> Void
-
-    private var configurationJSON: String {
-        let original = target.context.documentURL
-        let outer = URLComponents(string: original)
-        let nested = outer?.queryItems?.first(where: { $0.name == "file" })?.value
-        let portalQuery = outer?.fragment?.components(separatedBy: "?").dropFirst().joined(separator: "?") ?? ""
-        let portalItems = URLComponents(string: "https://aa.flatironscloud.com/?" + portalQuery)?.queryItems ?? []
-        let portalTitle = portalItems.first(where: { $0.name == "documentTitle" })?.value
-        let filename = URL(string: nested ?? original)?.lastPathComponent ?? ""
-        let title = (portalTitle ?? filename.components(separatedBy: "__").last ?? filename)
-            .removingPercentEncoding ?? portalTitle ?? filename
-        let publicationPath = URL(string: nested ?? original)?.path
-            .components(separatedBy: "/").first(where: { $0.range(of: #"^\d+_.+_\d+$"#, options: .regularExpression) != nil }) ?? ""
-        let releaseTitle = publicationPath
-            .replacingOccurrences(of: #"^\d+_"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: "_", with: " ")
-            .removingPercentEncoding ?? title
-        let decodedOriginal = original.removingPercentEncoding ?? original
-        let pageRegex = try? NSRegularExpression(pattern: #"(?:[?#&])page=(\d+)"#)
-        let pageMatch = pageRegex?.firstMatch(in: decodedOriginal, range: NSRange(decodedOriginal.startIndex..., in: decodedOriginal))
-        var extractedPage = 0
-        if let pageMatch,
-           let pageRange = Range(pageMatch.range(at: 1), in: decodedOriginal),
-           let parsedPage = Int(decodedOriginal[pageRange]) {
-            extractedPage = parsedPage
-        }
-        let page = extractedPage > 0 ? extractedPage : (Int(target.context.pageNumber) ?? 0)
-        let values: [String: Any] = [
-            "ata": target.context.ata,
-            "model": target.context.model,
-            "page": page,
-            "title": title,
-            "publication": releaseTitle
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: values)) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "{}"
-    }
 
     func makeCoordinator() -> Coordinator { Coordinator(onStatus: onStatus) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
-        let controller = configuration.userContentController
-        controller.add(context.coordinator, name: "cmmFlow")
-        let script = """
-        (() => {
-          if (location.hostname !== 'aa.flatironscloud.com' || window !== window.top) return;
-          const goal = \(configurationJSON);
-          let completed = false, lastStatus = '', readySince = 0, lastSelectionAttempt = 0, branchExpansionAt = 0;
-          const report = text => {
-            if (text === lastStatus) return;
-            lastStatus = text;
-            window.webkit.messageHandlers.cmmFlow.postMessage(text);
-          };
-          const decode = s => { try { return decodeURIComponent(s); } catch (_) { return s; } };
-          const normalize = s => decode(decode(s || '')).toLowerCase().replace(/\\s+/g, ' ').trim();
-          const compact = s => normalize(s).replace(/[^a-z0-9]/g, '');
-          const visible = n => !!n && !!(n.offsetWidth || n.offsetHeight || n.getClientRects().length)
-            && getComputedStyle(n).visibility !== 'hidden';
-          const windows = (w, depth = 0) => {
-            const all = [w];
-            if (depth < 4) {
-              for (const f of w.document.querySelectorAll('iframe')) {
-                if (!visible(f)) continue;
-                try { if (f.contentWindow.document) all.push(...windows(f.contentWindow, depth + 1)); } catch (_) {}
-              }
-            }
-            return all;
-          };
-          const modelFamily = () => {
-            const model = compact(goal.model);
-            const match = model.match(/(777|787|767|757|747|737|320|321|319)/);
-            if (!match) return '';
-            return (['320', '321', '319'].includes(match[1]) ? 'a' : 'b') + match[1];
-          };
-          const findPublication = () => {
-            const ata = compact(goal.ata).replace(/[^0-9]/g, '').slice(0, 6);
-            if (ata.length < 4) return { error: 'The training does not contain a complete ATA chapter.' };
-            const links = () => Array.from(document.querySelectorAll('#libraryTree a'));
-            // Pinpoint's library tree commonly exposes only the chapter-level
-            // node (e.g. 25-20), while training stores the full sub-ATA
-            // (25-20-82). Use that chapter as the publication search scope.
-            let ataLink = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata);
-            if (!ataLink) {
-              ataLink = links().find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata.slice(0, 4));
-            }
-            if (!ataLink) return { error: 'ATA chapter ' + goal.ata.slice(0, 5) + ' is not listed in the current Pinpoint library.' };
-            const ataNode = ataLink.closest('li');
-            const switcher = ataNode?.querySelector(':scope > span[treenode_switch]');
-            if (switcher?.classList.contains('center_close')) {
-              branchExpansionAt = Date.now();
-              switcher.click();
-              return { waiting: 'Expanding ATA ' + goal.ata + ' in the Pinpoint library…' };
-            }
-            const family = modelFamily();
-            const expected = compact(goal.publication || goal.title);
-            const children = Array.from(ataNode?.querySelectorAll('ul a') || [])
-              .filter(a => {
-                const label = compact(a.textContent);
-                return label && (!family || label.includes(family));
-              });
-            if (!children.length && branchExpansionAt && Date.now() - branchExpansionAt < 15000) {
-              return { waiting: 'Loading current publications for ATA ' + goal.ata + '…' };
-            }
-            if (!children.length) return { error: 'No current ' + (family || '') + ' publication is listed under ATA chapter ' + goal.ata.slice(0, 5) + '.' };
-            branchExpansionAt = 0;
-            const exact = expected ? children.filter(a => compact(a.textContent).includes(expected)
-              || expected.includes(compact(a.textContent))) : [];
-            const matches = exact.length ? exact : (children.length === 1 ? children : []);
-            if (matches.length !== 1) {
-              return { error: 'More than one current publication matches ATA ' + goal.ata + ' / ' + (family || goal.model) + '. Select the correct publication in Pinpoint.' };
-            }
-            return { link: matches[0] };
-          };
-          const tick = () => {
-            if (completed) return;
-            if (!document.querySelector('#libraryTree')) {
-              report('Sign in to American Airlines in the embedded Pinpoint window.');
-              return;
-            }
-            const resolved = findPublication();
-            if (resolved.waiting) {
-              report(resolved.waiting);
-              return;
-            }
-            if (resolved.error) {
-              report(resolved.error);
-              return;
-            }
-            const publicationLink = resolved.link;
-            const selected = publicationLink.classList.contains('curSelectedNode');
-            if (!selected && Date.now() - lastSelectionAttempt > 5000) {
-              lastSelectionAttempt = Date.now();
-              publicationLink.click();
-              report('Opening current release: ' + publicationLink.textContent.trim() + '…');
-              return;
-            }
-            if (!selected) {
-              report('Waiting for current CMM release: ' + publicationLink.textContent.trim() + '…');
-              return;
-            }
-            const frames = windows(window);
-            const barrier = frames.some(w => Array.from(w.document.querySelectorAll('button,a,[role=button],input'))
-              .some(n => visible(n) && /^i\\s+acknowledge$/i.test((n.innerText || n.value || n.textContent || '').trim())));
-            if (barrier) {
-              readySince = 0;
-              report('Review Important Attachments and press I Acknowledge to continue.');
-              return;
-            }
-            const viewer = frames.map(w => {
-              const app = w.PDFViewerApplication;
-              if (!app || !app.pdfDocument || !app.pdfDocument.numPages) return null;
-              const identity = normalize((app.url || '') + ' ' + (app.baseUrl || '') + ' ' + w.location.href);
-              const expected = compact(goal.publication || goal.title);
-              return identity && expected && compact(identity).includes(expected) ? app : null;
-            }).find(Boolean);
-            if (!viewer) {
-              report('Waiting for the selected CMM PDF to finish loading…');
-              return;
-            }
-            if (!readySince) { readySince = Date.now(); return; }
-            if (Date.now() - readySince < 2000) return;
-            if (!goal.page) { completed = true; report('CMM opened. No numeric match page was stored in this training.'); return; }
-            if (goal.page < 1 || goal.page > viewer.pdfDocument.numPages) {
-              report('The trained page is outside the current CMM release. Check the training page number.');
-              return;
-            }
-            if (viewer.page !== goal.page) { viewer.page = goal.page; return; }
-            completed = true;
-            report('CMM opened at match page ' + goal.page + '.');
-          };
-          // OPEN DOC resumes this same authenticated portal session. It clicks
-          // the visible acknowledgement gate, then lets the guarded resolver
-          // continue to the exact page stored by the trainer.
-          window.__smartLookContinueCMM = () => {
-            const frames = windows(window);
-            const acknowledgement = frames.flatMap(w => Array.from(w.document.querySelectorAll('button,a,[role=button],input'))
-              .filter(n => visible(n) && /^i\\s+acknowledge$/i.test((n.innerText || n.value || n.textContent || '').trim())))[0];
-            if (acknowledgement) acknowledgement.click();
-            completed = false;
-            readySince = 0;
-            tick();
-          };
-          tick();
-          const timer = setInterval(tick, 750);
-          window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
-        })();
-        """
-        controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
-        view.load(URLRequest(url: URL(string: "https://aa.flatironscloud.com/pinpoint/")!))
+        // Establish the Pinpoint authentication session before requesting the
+        // trained CMM URL.
+        view.load(URLRequest(url: initialURL))
         return view
     }
 
@@ -2392,32 +2241,47 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         context.coordinator.onStatus = onStatus
         guard let continueRequestID, continueRequestID != context.coordinator.lastContinueRequestID else { return }
         context.coordinator.lastContinueRequestID = continueRequestID
-        view.evaluateJavaScript("window.__smartLookContinueCMM && window.__smartLookContinueCMM()") { _, error in
-            if let error { self.onStatus("Could not continue CMM navigation: \(error.localizedDescription)") }
-        }
+        let nextURL = cmmLinkOpened ? target.url : initialURL
+        view.load(URLRequest(url: nextURL))
     }
 
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         view.stopLoading()
-        view.configuration.userContentController.removeScriptMessageHandler(forName: "cmmFlow")
         view.navigationDelegate = nil
         view.uiDelegate = nil
     }
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
         var lastContinueRequestID: UUID?
         init(onStatus: @escaping (String) -> Void) { self.onStatus = onStatus }
-        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.frameInfo.isMainFrame,
-                  message.frameInfo.securityOrigin.host == "aa.flatironscloud.com",
-                  let text = message.body as? String else { return }
-            DispatchQueue.main.async { self.onStatus(text) }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            let host = webView.url?.host?.lowercased() ?? ""
+            onStatus(host.contains("pfloginapp")
+                ? "Waiting for American Airlines sign-in…"
+                : "Loading Pinpoint…")
         }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            let currentURL = webView.url?.absoluteString.lowercased() ?? ""
+            if currentURL.contains("login") {
+                onStatus("Sign in above. When Pinpoint finishes loading, tap OPEN CMM.")
+            } else {
+                onStatus("Pinpoint is ready. Tap OPEN CMM to load the trained document.")
+            }
+        }
+
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             guard (error as NSError).code != NSURLErrorCancelled else { return }
-            onStatus("Portal could not load: \(error.localizedDescription)")
+            onStatus("CMM link could not load: \(error.localizedDescription). Tap OPEN DOC to retry.")
         }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            guard (error as NSError).code != NSURLErrorCancelled else { return }
+            onStatus("CMM navigation stopped: \(error.localizedDescription). Tap OPEN DOC to retry.")
+        }
+
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
