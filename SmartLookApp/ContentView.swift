@@ -1710,9 +1710,22 @@ private struct MVDDocumentBrowser: View {
     @State private var pageJumpRequest: MVDPageJumpRequest?
     @State private var portalLoginCompleted = false
     @State private var supplementsAcknowledged = false
+    @State private var cmmPortalStatus = "Signing in to Pinpoint and locating the current CMM release…"
+    @State private var cmmContinueRequestID: UUID?
 
     private var isCMM: Bool {
         target.context.manualType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().contains("CMM")
+    }
+
+    private var shouldShowCMMOpenButton: Bool {
+        let status = cmmPortalStatus.lowercased()
+        return isCMM
+            && !status.contains("cmm opened at match page")
+            && !status.contains("cmm opened. no numeric match page")
+            && (status.contains("opening current release")
+                || status.contains("acknowledge")
+                || status.contains("selected cmm pdf")
+                || status.contains("outside the current cmm release"))
     }
 
     /// Non-CMM manuals establish the site's origin before loading their URL.
@@ -1762,7 +1775,23 @@ private struct MVDDocumentBrowser: View {
 
                 ZStack {
                     if isCMM {
-                        MVDCMMPortalView(target: target)
+                        MVDCMMPortalView(target: target, status: $cmmPortalStatus, continueRequestID: cmmContinueRequestID)
+                            .overlay {
+                                if shouldShowCMMOpenButton {
+                                    Button {
+                                        cmmContinueRequestID = UUID()
+                                        cmmPortalStatus = "Continuing to the trained CMM document…"
+                                    } label: {
+                                        Text("OPEN DOC")
+                                            .font(.headline.weight(.bold))
+                                            .frame(width: 142, height: 48)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.blue)
+                                    .shadow(radius: 8)
+                                    .accessibilityHint("Continues through the CMM acknowledgement to the trained page")
+                                }
+                            }
                     } else {
                     MVDDocumentWebView(
                         url: portalLoginCompleted
@@ -2136,7 +2165,8 @@ private struct MVDDocumentWebView: UIViewRepresentable {
 // No direct viewer navigation occurs after sign-in or acknowledgement.
 private struct MVDCMMPortalView: View {
     let target: MVDDocumentTarget
-    @State private var status = "Signing in to Pinpoint and locating the current CMM release…"
+    @Binding var status: String
+    let continueRequestID: UUID?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -2147,6 +2177,7 @@ private struct MVDCMMPortalView: View {
 
             MVDCMMPortalWebView(
                 target: target,
+                continueRequestID: continueRequestID,
                 onStatus: { status = $0 }
             )
             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -2157,6 +2188,7 @@ private struct MVDCMMPortalView: View {
 
 private struct MVDCMMPortalWebView: UIViewRepresentable {
     let target: MVDDocumentTarget
+    let continueRequestID: UUID?
     let onStatus: (String) -> Void
 
     private var configurationJSON: String {
@@ -2331,6 +2363,18 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             completed = true;
             report('CMM opened at match page ' + goal.page + '.');
           };
+          // OPEN DOC resumes this same authenticated portal session. It clicks
+          // the visible acknowledgement gate, then lets the guarded resolver
+          // continue to the exact page stored by the trainer.
+          window.__smartLookContinueCMM = () => {
+            const frames = windows(window);
+            const acknowledgement = frames.flatMap(w => Array.from(w.document.querySelectorAll('button,a,[role=button],input'))
+              .filter(n => visible(n) && /^i\\s+acknowledge$/i.test((n.innerText || n.value || n.textContent || '').trim())))[0];
+            if (acknowledgement) acknowledgement.click();
+            completed = false;
+            readySince = 0;
+            tick();
+          };
           tick();
           const timer = setInterval(tick, 750);
           window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
@@ -2344,7 +2388,14 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: WKWebView, context: Context) { context.coordinator.onStatus = onStatus }
+    func updateUIView(_ view: WKWebView, context: Context) {
+        context.coordinator.onStatus = onStatus
+        guard let continueRequestID, continueRequestID != context.coordinator.lastContinueRequestID else { return }
+        context.coordinator.lastContinueRequestID = continueRequestID
+        view.evaluateJavaScript("window.__smartLookContinueCMM && window.__smartLookContinueCMM()") { _, error in
+            if let error { self.onStatus("Could not continue CMM navigation: \(error.localizedDescription)") }
+        }
+    }
 
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         view.stopLoading()
@@ -2355,6 +2406,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
+        var lastContinueRequestID: UUID?
         init(onStatus: @escaping (String) -> Void) { self.onStatus = onStatus }
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame,
