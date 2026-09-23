@@ -2179,7 +2179,12 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         let decodedOriginal = original.removingPercentEncoding ?? original
         let pageRegex = try? NSRegularExpression(pattern: #"(?:[?#&])page=(\d+)"#)
         let pageMatch = pageRegex?.firstMatch(in: decodedOriginal, range: NSRange(decodedOriginal.startIndex..., in: decodedOriginal))
-        let extractedPage = pageMatch.flatMap { Range($0.range(at: 1), in: decodedOriginal).map { Int(decodedOriginal[$0]) } } ?? 0
+        var extractedPage = 0
+        if let pageMatch,
+           let pageRange = Range(pageMatch.range(at: 1), in: decodedOriginal),
+           let parsedPage = Int(decodedOriginal[pageRange]) {
+            extractedPage = parsedPage
+        }
         let page = extractedPage > 0 ? extractedPage : (Int(target.context.pageNumber) ?? 0)
         let values: [String: Any] = [
             "ata": target.context.ata,
