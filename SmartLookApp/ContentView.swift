@@ -2462,6 +2462,16 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             }
             return false;
           };
+          const safeURL = value => {
+            try { const url = new URL(value, location.href); return url.host + url.pathname; }
+            catch (_) { return 'unavailable'; }
+          };
+          const viewerSource = (() => {
+            if (!location.pathname.toLowerCase().endsWith('/viewer.html')) return '';
+            const params = new URLSearchParams(location.search);
+            return params.get('file') || params.get('url') || '';
+          })();
+          if (viewerSource) report('Pinpoint viewer PDF source: ' + safeURL(viewerSource) + '.');
           const describeResponse = (url, status, mime, length) => {
             if (!isPDFRequest(url)) return;
             const type = mime || 'unknown MIME';
@@ -2512,6 +2522,17 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             if (app?.pdfDocument?.numPages) {
               report('PDF.js loaded document: ' + app.pdfDocument.numPages + ' pages.');
               return;
+            }
+            if (attempts === 15 && location.pathname.toLowerCase().endsWith('/viewer.html')) {
+              const state = !app ? 'PDF.js application is not available'
+                : app.loading ? 'PDF.js is still loading'
+                : 'PDF.js has no PDF document';
+              report('Pinpoint viewer diagnostic after 15s: ' + state
+                + '; source ' + (viewerSource ? safeURL(viewerSource) : 'not found') + '.');
+              const pdfResource = performance.getEntriesByType('resource')
+                .map(entry => entry.name).find(name => /\\.pdf(?:$|[?#])|\\/services\\/content\\/pdf\\//i.test(name));
+              if (pdfResource) report('PDF resource requested by viewer: ' + safeURL(pdfResource) + '.');
+              else report('No PDF resource request is visible in the Pinpoint viewer frame.');
             }
             if (attempts < 90) window.setTimeout(inspectViewer, 1000);
           };
