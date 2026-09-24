@@ -2299,26 +2299,58 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const links = Array.from(document.querySelectorAll('#libraryTree a'));
             let ataLink = links.find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata)
               || links.find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata.slice(0, 4));
-            if (!ataLink) return { error: 'CMM ATA ' + goal.ata + ' is not listed in Pinpoint.' };
-            const ataNode = ataLink.closest('li');
-            const switcher = ataNode?.querySelector(':scope > span[treenode_switch]');
-            if (switcher?.classList.contains('center_close')) {
-              expansionAt = Date.now(); switcher.click();
-              return { waiting: 'Opening the CMM chapter in Pinpoint…' };
-            }
             const family = modelFamily();
             const expected = compact(goal.publication || goal.title);
-            const children = Array.from(ataNode?.querySelectorAll('ul a') || []).filter(a => {
+            const matchesTitle = a => {
               const label = compact(a.textContent);
-              return label && (!family || label.includes(family));
-            });
-            if (!children.length && expansionAt && Date.now() - expansionAt < 15000)
-              return { waiting: 'Loading CMM releases…' };
+              return expected && label && (label.includes(expected) || expected.includes(label))
+                && (!family || label.includes(family));
+            };
+            let matches = [];
+            if (ataLink) {
+              const ataNode = ataLink.closest('li');
+              const switcher = ataNode?.querySelector(':scope > span[treenode_switch]');
+              if (switcher?.classList.contains('center_close')) {
+                expansionAt = Date.now(); switcher.click();
+                return { waiting: 'Opening the CMM chapter in Pinpoint…' };
+              }
+              const children = Array.from(ataNode?.querySelectorAll('ul a') || []).filter(a => {
+                const label = compact(a.textContent);
+                return label && (!family || label.includes(family));
+              });
+              if (!children.length && expansionAt && Date.now() - expansionAt < 15000)
+                return { waiting: 'Loading CMM releases…' };
+              matches = children.filter(matchesTitle);
+              if (!matches.length && children.length === 1) matches = children;
+            }
+            // Pinpoint does not expose every CMM ATA as a separate tree node in every
+            // publication. If the ATA lookup misses, locate the exact trained release
+            // title in the tree and expand its ancestor nodes instead of stopping early.
+            if (!matches.length) {
+              const titled = links.filter(matchesTitle);
+              if (titled.length === 1) {
+                const candidate = titled[0];
+                const ancestors = [];
+                let node = candidate.closest('li');
+                while (node && node !== document.querySelector('#libraryTree')) {
+                  ancestors.push(node);
+                  node = node.parentElement?.closest('li');
+                }
+                for (const ancestor of ancestors.reverse()) {
+                  const switcher = ancestor.querySelector(':scope > span[treenode_switch]');
+                  if (switcher?.classList.contains('center_close')) {
+                    expansionAt = Date.now(); switcher.click();
+                    return { waiting: 'Opening the matching CMM release in Pinpoint…' };
+                  }
+                }
+                matches = [candidate];
+              } else if (!ataLink) {
+                return { error: titled.length > 1
+                  ? 'Several Pinpoint entries match the trained CMM title. Select the correct release in Pinpoint.'
+                  : 'Pinpoint does not list ATA ' + goal.ata + ' as a chapter, and no unique release matches “' + (goal.publication || goal.title) + '”.' };
+              }
+            }
             expansionAt = 0;
-            if (!children.length) return { error: 'No current CMM release matches ATA ' + goal.ata + ' / ' + (family || goal.model) + '.' };
-            const exact = expected ? children.filter(a => compact(a.textContent).includes(expected)
-              || expected.includes(compact(a.textContent))) : [];
-            const matches = exact.length ? exact : (children.length === 1 ? children : []);
             if (matches.length !== 1) return { error: 'More than one CMM release matches. Select the correct release in Pinpoint.' };
             return { link: matches[0] };
           };
