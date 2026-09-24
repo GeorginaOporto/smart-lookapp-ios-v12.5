@@ -2159,7 +2159,7 @@ private struct MVDCMMPortalView: View {
 
     private var helperText: String {
         if status.localizedCaseInsensitiveContains("acknowledge") {
-            return "Press I Acknowledge in the document above, then tap OPEN DOC again."
+            return "Press I Acknowledge in the document above. The trained page will open automatically."
         }
         if !portalLoginCompleted {
             return "Sign in above. When Pinpoint is ready, tap OPEN DOC to open the current CMM release."
@@ -2207,7 +2207,7 @@ private struct MVDCMMPortalView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.blue)
-            .accessibilityHint("Opens the current CMM release; after manually accepting I Acknowledge, tap again to open the trained page")
+            .accessibilityHint("Opens the current CMM release; after you accept I Acknowledge, the trained page opens automatically")
             .disabled(!portalLoginCompleted)
             Text(helperText)
                 .font(.caption2)
@@ -2359,7 +2359,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             return { link: matches[0] };
           };
           const tick = () => {
-            if (completed || waitingForAck) return;
+            if (completed) return;
             if (!document.querySelector('#libraryTree')) {
               report('Sign in to American Airlines in the embedded Pinpoint window.'); return;
             }
@@ -2380,7 +2380,11 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               .some(n => visible(n) && /^i\\s+acknowledge$/i.test((n.innerText || n.value || n.textContent || '').trim())));
             if (acknowledge) {
               waitingForAck = true; readySince = 0;
-              report('Review Important Attachments and press I Acknowledge, then tap OPEN DOC.'); return;
+              report('Review Important Attachments and press I Acknowledge. The trained page will open automatically.'); return;
+            }
+            if (waitingForAck) {
+              waitingForAck = false; readySince = 0;
+              report('Acknowledgement complete. Opening the trained CMM page…');
             }
             const viewer = frames.map(w => {
               const app = w.PDFViewerApplication;
