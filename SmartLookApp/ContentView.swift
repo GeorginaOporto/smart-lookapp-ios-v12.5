@@ -2345,16 +2345,18 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const modelNumber = compact(goal.model).match(/(777|787)/)?.[1]
               || compact(goal.publication || goal.title).match(/b(777|787)/)?.[1]
               || '';
+            const hasAircraftVariants = releases.some(a => /b(777|787)/.test(labelOf(a)));
             const titleMatches = releases.filter(a => {
               const label = labelOf(a);
               return expected && (label.includes(expected) || expected.includes(label));
             });
-            if (modelNumber) {
+            if (hasAircraftVariants && modelNumber) {
               const modelMatches = releases.filter(a => labelOf(a).includes('b' + modelNumber));
               if (modelMatches.length === 1) return { link: modelMatches[0] };
               if (modelMatches.length > 1 && titleMatches.length === 1) return { link: titleMatches[0] };
               return { error: 'Pinpoint has no unique B' + modelNumber + ' CMM release under ATA ' + goal.ata + '.' };
             }
+            if (!hasAircraftVariants && releases.length === 1) return { link: releases[0] };
             if (titleMatches.length === 1) return { link: titleMatches[0] };
             return { error: 'Could not uniquely identify the trained CMM release under ATA ' + goal.ata + '.' };
           };
