@@ -2312,14 +2312,9 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const openingComponents = openNode(components, 'Opening Components in Pinpoint…');
             if (openingComponents) return openingComponents;
 
-            const addendum = descendant(components, label => label.includes('01aaipcaddendum') || label === 'aaipcaddendum');
-            if (!addendum) return { waiting: 'Opening 01 AA IPC Addendum…' };
-            const openingAddendum = openNode(addendum, 'Opening 01 AA IPC Addendum…');
-            if (openingAddendum) return openingAddendum;
-
             const chapterDigits = ata.slice(0, 4);
-            // Pinpoint places “01 AA IPC Addendum” and ATA chapter folders as
-            // siblings under Components; the ATA branch is not inside the Addendum.
+            // The IPC Addendum is a separate link beside the ATA folders. Skip it
+            // and follow Components > chapter > full ATA > model-specific release.
             const chapter = descendant(components, label => label.replace(/[^0-9]/g, '') === chapterDigits);
             if (!chapter) return { waiting: 'Opening CMM chapter ' + chapterDigits.slice(0, 2) + '-' + chapterDigits.slice(2) + '…' };
             const openingChapter = openNode(chapter, 'Opening CMM chapter ' + chapterDigits.slice(0, 2) + '-' + chapterDigits.slice(2) + '…');
@@ -2334,12 +2329,23 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const releases = allLinks(ataFolder.closest('li')).filter(a => {
               if (a === ataFolder) return false;
               const label = labelOf(a);
-              // The model may be implicit in the selected library, so Pinpoint's
-              // release title may omit “B777”; constrain matching to this exact ATA branch.
-              return expected && label && (label.includes(expected) || expected.includes(label));
+              return label && label.includes('beaerospace') && label.includes(ata);
             });
-            if (releases.length !== 1) return { waiting: 'Locating the trained CMM release under ATA ' + goal.ata + '…' };
-            return { link: releases[0] };
+            const modelNumber = compact(goal.model).match(/(777|787)/)?.[1]
+              || compact(goal.publication || goal.title).match(/b(777|787)/)?.[1]
+              || '';
+            const titleMatches = releases.filter(a => {
+              const label = labelOf(a);
+              return expected && (label.includes(expected) || expected.includes(label));
+            });
+            if (modelNumber) {
+              const modelMatches = releases.filter(a => labelOf(a).includes('b' + modelNumber));
+              if (modelMatches.length === 1) return { link: modelMatches[0] };
+              if (modelMatches.length > 1 && titleMatches.length === 1) return { link: titleMatches[0] };
+              return { error: 'Pinpoint has no unique B' + modelNumber + ' CMM release under ATA ' + goal.ata + '.' };
+            }
+            if (titleMatches.length === 1) return { link: titleMatches[0] };
+            return { error: 'Could not uniquely identify the trained CMM release under ATA ' + goal.ata + '.' };
           };
           const tick = () => {
             if (completed) return;
