@@ -2318,7 +2318,9 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             if (openingAddendum) return openingAddendum;
 
             const chapterDigits = ata.slice(0, 4);
-            const chapter = descendant(addendum, label => label.replace(/[^0-9]/g, '') === chapterDigits);
+            // Pinpoint places “01 AA IPC Addendum” and ATA chapter folders as
+            // siblings under Components; the ATA branch is not inside the Addendum.
+            const chapter = descendant(components, label => label.replace(/[^0-9]/g, '') === chapterDigits);
             if (!chapter) return { waiting: 'Opening CMM chapter ' + chapterDigits.slice(0, 2) + '-' + chapterDigits.slice(2) + '…' };
             const openingChapter = openNode(chapter, 'Opening CMM chapter ' + chapterDigits.slice(0, 2) + '-' + chapterDigits.slice(2) + '…');
             if (openingChapter) return openingChapter;
