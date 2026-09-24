@@ -2274,6 +2274,9 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        // Pinpoint can open the selected publication/PDF viewer in a scripted
+        // child window. Keep that navigation inside this authenticated web view.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         let controller = configuration.userContentController
         controller.add(context.coordinator, name: "cmmFlow")
         let script = """
@@ -2491,6 +2494,23 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             }
         }
 
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            let response = navigationResponse.response
+            let urlText = response.url?.absoluteString.lowercased() ?? ""
+            let isPDFViewer = urlText.contains("viewer.html") || urlText.contains("/document/")
+                || response.mimeType?.localizedCaseInsensitiveContains("pdf") == true
+            if isPDFViewer {
+                let statusCode = (response as? HTTPURLResponse)?.statusCode
+                let codeText = statusCode.map(String.init) ?? "unknown"
+                let mime = response.mimeType ?? "unknown MIME"
+                DispatchQueue.main.async {
+                    self.onStatus("CMM viewer response: HTTP \(codeText), \(mime).")
+                }
+            }
+            decisionHandler(.allow)
+        }
+
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             guard (error as NSError).code != NSURLErrorCancelled else { return }
             onStatus("CMM link could not load: \(error.localizedDescription). Tap OPEN DOC to retry.")
@@ -2503,7 +2523,13 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
+            if navigationAction.targetFrame == nil {
+                let urlText = navigationAction.request.url?.absoluteString.lowercased() ?? ""
+                if urlText.contains("viewer.html") || urlText.contains("/document/") {
+                    onStatus("Pinpoint opened the CMM viewer in a new window; keeping it inside SmartLookApp…")
+                }
+                webView.load(navigationAction.request)
+            }
             return nil
         }
     }
