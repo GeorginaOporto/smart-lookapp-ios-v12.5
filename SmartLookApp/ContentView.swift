@@ -7,7 +7,6 @@ import ImageIO
 import CoreImage
 import WebKit
 import MessageUI
-import PDFKit
 
 // MARK: - Sanitized MVD session
 
@@ -2157,8 +2156,6 @@ private struct MVDCMMPortalView: View {
     @Binding var status: String
     @Binding var portalLoginCompleted: Bool
     @State private var continueRequestID: UUID?
-    @State private var downloadedPDF: URL?
-    @State private var downloadedPage = 0
 
     private var helperText: String {
         if status.localizedCaseInsensitiveContains("acknowledge") {
@@ -2181,41 +2178,24 @@ private struct MVDCMMPortalView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
 
-            Group {
-                if let downloadedPDF {
-                    MVDLocalCMMDocumentView(fileURL: downloadedPDF, page: downloadedPage)
-                } else {
-                    MVDCMMPortalWebView(
-                        target: target,
-                        initialURL: initialURL,
-                        continueRequestID: continueRequestID,
-                        onStatus: { newStatus in
-                            status = newStatus
-                            if newStatus.hasPrefix("Pinpoint is ready") {
-                                portalLoginCompleted = true
-                            } else if newStatus.localizedCaseInsensitiveContains("sign in to American Airlines") {
-                                portalLoginCompleted = false
-                            }
-                        },
-                        onPDFReady: { fileURL, page, pageCount in
-                            downloadedPDF = fileURL
-                            downloadedPage = page
-                            status = "CMM opened at trained page \(page) of \(pageCount)."
-                        }
-                    )
+            MVDCMMPortalWebView(
+                target: target,
+                initialURL: initialURL,
+                continueRequestID: continueRequestID,
+                onStatus: { newStatus in
+                    status = newStatus
+                    if newStatus.hasPrefix("Pinpoint is ready") {
+                        portalLoginCompleted = true
+                    } else if newStatus.localizedCaseInsensitiveContains("sign in to American Airlines") {
+                        portalLoginCompleted = false
+                    }
                 }
-            }
+            )
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.blue.opacity(0.55)))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Button {
-                if let downloadedPDF {
-                    try? FileManager.default.removeItem(at: downloadedPDF)
-                    self.downloadedPDF = nil
-                    status = "Reopening Pinpoint to retry the trained CMM…"
-                    return
-                }
                 status = status.localizedCaseInsensitiveContains("acknowledge")
                     ? "Continuing to the trained CMM page…"
                     : "Locating the trained CMM release…"
@@ -2233,30 +2213,7 @@ private struct MVDCMMPortalView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
-        .onDisappear {
-            if let downloadedPDF { try? FileManager.default.removeItem(at: downloadedPDF) }
-        }
     }
-}
-
-private struct MVDLocalCMMDocumentView: UIViewRepresentable {
-    let fileURL: URL
-    let page: Int
-
-    func makeUIView(context: Context) -> PDFView {
-        let view = PDFView()
-        view.autoScales = true
-        view.displayMode = .singlePageContinuous
-        if let document = PDFDocument(url: fileURL) {
-            view.document = document
-            if let trainedPage = document.page(at: max(page - 1, 0)) {
-                view.go(to: trainedPage)
-            }
-        }
-        return view
-    }
-
-    func updateUIView(_ view: PDFView, context: Context) {}
 }
 
 private struct MVDCMMPortalWebView: UIViewRepresentable {
@@ -2264,29 +2221,6 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     let initialURL: URL
     let continueRequestID: UUID?
     let onStatus: (String) -> Void
-    let onPDFReady: (URL, Int, Int) -> Void
-
-    private var trainedPage: Int {
-        let original = target.url.absoluteString
-        let pageRegex = try? NSRegularExpression(pattern: #"(?:[?#&])page=(\d+)"#)
-        let linkPage = pageRegex.flatMap { regex -> Int? in
-            guard let match = regex.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)),
-                  let range = Range(match.range(at: 1), in: original) else { return nil }
-            return Int(original[range])
-        }
-        return linkPage ?? Int(target.context.pageNumber) ?? 0
-    }
-
-    private var trainedPDFURL: URL? {
-        guard let outer = URLComponents(url: target.url, resolvingAgainstBaseURL: false),
-              let value = outer.queryItems?.first(where: { $0.name == "file" })?.value,
-              let rawURL = URL(string: value),
-              rawURL.scheme == "https",
-              rawURL.host?.lowercased() == "aa.flatironscloud.com",
-              rawURL.path.lowercased().contains("/ppserver/services/content/pdf/") else { return nil }
-        guard trainedPage > 0 else { return rawURL }
-        return URL(string: rawURL.absoluteString + "#page=\(trainedPage)")
-    }
 
     private var configurationJSON: String {
         let original = target.url.absoluteString
@@ -2328,17 +2262,13 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             "page": page,
             "title": title,
             "publication": releaseTitle,
-            "trainedURL": target.url.absoluteString,
-            "trainedPDFURL": trainedPDFURL?.absoluteString ?? ""
+            "trainedURL": target.url.absoluteString
         ]
         let data = (try? JSONSerialization.data(withJSONObject: values)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onStatus: onStatus, onPDFReady: onPDFReady,
-                    trainedPDFURL: trainedPDFURL, trainedPage: trainedPage)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(onStatus: onStatus, trainedViewerURL: target.url) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -2436,19 +2366,23 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             return { error: 'Could not uniquely identify the trained CMM release under ATA ' + goal.ata + '.' };
           };
           const openTrainedPDF = () => {
-            if (!goal.trainedPDFURL) {
-              report('The training has no direct CMM PDF link. Check the saved training link.');
+            if (!goal.trainedURL) {
+              report('The training has no saved CMM link. Check the training record.');
               return;
             }
-            const pdfURL = new URL(goal.trainedPDFURL, window.location.href);
-            if (pdfURL.protocol !== 'https:' || pdfURL.hostname !== 'aa.flatironscloud.com'
-                || !pdfURL.pathname.toLowerCase().includes('/ppserver/services/content/pdf/')) {
-              report('The saved CMM PDF link is not a valid Pinpoint PDF.');
+            let trainedURL;
+            try { trainedURL = new URL(goal.trainedURL, window.location.href); }
+            catch (_) { report('The saved CMM link is invalid.'); return; }
+            if (trainedURL.protocol !== 'https:' || trainedURL.hostname !== 'aa.flatironscloud.com') {
+              report('The saved CMM link is not a valid Pinpoint URL.');
               return;
+            }
+            if (trainedURL.pathname.toLowerCase().endsWith('/viewer.html') && goal.page > 0) {
+              trainedURL.hash = 'page=' + goal.page;
             }
             completed = true;
-            report('Downloading trained CMM PDF at page ' + (goal.page || 'saved in the document') + '…');
-            window.webkit.messageHandlers.cmmFlow.postMessage({ kind: 'openTrainedPDF' });
+            report('Opening the saved CMM viewer at trained page ' + (goal.page || '…') + '.');
+            window.location.assign(trainedURL.href);
           };
           const tick = () => {
             if (completed) return;
@@ -2604,8 +2538,58 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         })();
         """
         controller.addUserScript(WKUserScript(source: pdfDiagnostics, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        let trainedViewerNavigation = """
+        (() => {
+          if (location.hostname.toLowerCase() !== 'aa.flatironscloud.com'
+              || !location.pathname.toLowerCase().endsWith('/viewer.html')) return;
+          const goal = \(configurationJSON);
+          const handler = window.webkit?.messageHandlers?.cmmFlow;
+          let lastStatus = '', attempts = 0, finished = false;
+          const report = text => {
+            if (text === lastStatus) return;
+            lastStatus = text;
+            try { handler?.postMessage(text); } catch (_) {}
+          };
+          const navigateToTrainedPage = () => {
+            if (finished) return;
+            const app = window.PDFViewerApplication;
+            if (!app?.pdfDocument || !app.pdfViewer) {
+              if (++attempts < 240) window.setTimeout(navigateToTrainedPage, 1000);
+              else report('Pinpoint viewer is still loading the CMM PDF. Use OPEN DOC to retry.');
+              return;
+            }
+            const page = Number(goal.page || 0);
+            const count = Number(app.pdfDocument.numPages || 0);
+            if (!page) { finished = true; report('CMM PDF loaded; no trained page is saved.'); return; }
+            if (page < 1 || page > count) {
+              finished = true;
+              report('Trained page ' + page + ' is outside this CMM release (' + count + ' pages).');
+              return;
+            }
+            if (Number(app.page) !== page) {
+              report('Loading trained CMM page ' + page + ' of ' + count + '…');
+              try { app.page = page; } catch (_) {}
+              try { app.pdfViewer.currentPageNumber = page; } catch (_) {}
+              window.setTimeout(navigateToTrainedPage, 500);
+              return;
+            }
+            const pageView = app.pdfViewer.getPageView?.(page - 1);
+            if (pageView && pageView.renderingState !== 3) {
+              report('Rendering trained CMM page ' + page + ' of ' + count + '…');
+              window.setTimeout(navigateToTrainedPage, 500);
+              return;
+            }
+            finished = true;
+            report('CMM opened at trained page ' + page + ' of ' + count + '.');
+          };
+          const start = () => window.setTimeout(navigateToTrainedPage, 250);
+          if (window.PDFViewerApplication?.initializedPromise) {
+            window.PDFViewerApplication.initializedPromise.then(start, start);
+          } else start();
+        })();
+        """
+        controller.addUserScript(WKUserScript(source: trainedViewerNavigation, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)
-        context.coordinator.webView = view
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.load(URLRequest(url: initialURL))
@@ -2614,7 +2598,6 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.onStatus = onStatus
-        context.coordinator.onPDFReady = onPDFReady
         guard let continueRequestID, continueRequestID != context.coordinator.lastContinueRequestID else { return }
         context.coordinator.lastContinueRequestID = continueRequestID
         context.coordinator.prepareForRetry()
@@ -2627,9 +2610,6 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
-        coordinator.downloadTask?.cancel()
-        coordinator.downloadSession?.invalidateAndCancel()
-        coordinator.webView = nil
         view.stopLoading()
         view.configuration.userContentController.removeScriptMessageHandler(forName: "cmmFlow")
         view.navigationDelegate = nil
@@ -2638,33 +2618,18 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
-        var onPDFReady: (URL, Int, Int) -> Void
-        let trainedPDFURL: URL?
-        let trainedPage: Int
-        weak var webView: WKWebView?
-        var downloadTask: URLSessionDownloadTask?
-        var downloadSession: URLSession?
         var lastContinueRequestID: UUID?
         private var lastFlowStatus = ""
         private var lastPDFDiagnostic = ""
         private var acknowledgementPending = false
-        private var directPDFRequested = false
-        init(onStatus: @escaping (String) -> Void,
-             onPDFReady: @escaping (URL, Int, Int) -> Void,
-             trainedPDFURL: URL?, trainedPage: Int) {
+        let trainedViewerURL: URL
+        init(onStatus: @escaping (String) -> Void, trainedViewerURL: URL) {
             self.onStatus = onStatus
-            self.onPDFReady = onPDFReady
-            self.trainedPDFURL = trainedPDFURL
-            self.trainedPage = trainedPage
+            self.trainedViewerURL = trainedViewerURL
         }
 
         func prepareForRetry() {
-            downloadTask?.cancel()
-            downloadSession?.invalidateAndCancel()
-            downloadTask = nil
-            downloadSession = nil
             acknowledgementPending = false
-            directPDFRequested = false
             lastPDFDiagnostic = ""
         }
 
@@ -2674,105 +2639,19 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                 lastFlowStatus = text
                 if text.contains("Review Important Attachments and press I Acknowledge") {
                     acknowledgementPending = true
+                } else if text.contains("Opening the saved CMM viewer at trained page") {
+                    // The page script has observed the acknowledgement close and
+                    // is now deliberately navigating to this saved training URL.
+                    acknowledgementPending = false
                 }
             } else if let payload = message.body as? [String: Any],
                       payload["kind"] as? String == "pdfDiagnostic",
                       let detail = payload["message"] as? String {
                 lastPDFDiagnostic = detail
-            } else if let payload = message.body as? [String: Any],
-                      payload["kind"] as? String == "openTrainedPDF" {
-                downloadTrainedPDF()
-                return
             } else {
                 return
             }
             publishStatus()
-        }
-
-        private func downloadTrainedPDF() {
-            guard !directPDFRequested else { return }
-            guard let trainedPDFURL, let webView else {
-                lastFlowStatus = "No trained CMM PDF link is available. Tap OPEN DOC to retry."
-                publishStatus()
-                return
-            }
-            directPDFRequested = true
-            acknowledgementPending = false
-            lastPDFDiagnostic = ""
-            lastFlowStatus = "Downloading the trained CMM PDF securely…"
-            publishStatus()
-
-            var components = URLComponents(url: trainedPDFURL, resolvingAgainstBaseURL: false)
-            components?.fragment = nil
-            guard let requestURL = components?.url else {
-                lastFlowStatus = "The trained CMM PDF link is invalid. Tap OPEN DOC to retry."
-                publishStatus()
-                return
-            }
-            webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-                guard let self else { return }
-                let host = requestURL.host?.lowercased() ?? ""
-                let applicable = cookies.filter { cookie in
-                    let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-                    return (host == domain || host.hasSuffix("." + domain))
-                        && requestURL.path.hasPrefix(cookie.path)
-                }
-                let configuration = URLSessionConfiguration.ephemeral
-                for cookie in applicable { configuration.httpCookieStorage?.setCookie(cookie) }
-                self.downloadSession = URLSession(configuration: configuration)
-                var request = URLRequest(url: requestURL, cachePolicy: .reloadIgnoringLocalCacheData,
-                                         timeoutInterval: 120)
-                request.setValue("https://aa.flatironscloud.com/pinpoint/", forHTTPHeaderField: "Referer")
-                self.downloadTask = self.downloadSession?.downloadTask(with: request) { [weak self] temporaryURL, response, error in
-                    guard let self else { return }
-                    let httpCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-                    let mime = response?.mimeType ?? "unknown"
-                    guard error == nil, let temporaryURL, (200...299).contains(httpCode) else {
-                        DispatchQueue.main.async {
-                            self.lastFlowStatus = "CMM PDF download failed (HTTP \(httpCode), \(mime)): \(error?.localizedDescription ?? "server rejected the request"). Tap OPEN DOC to retry."
-                            self.publishStatus()
-                        }
-                        return
-                    }
-                    let destination = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("smartlook-cmm-\(UUID().uuidString).pdf")
-                    do {
-                        let handle = try FileHandle(forReadingFrom: temporaryURL)
-                        let signature = try handle.read(upToCount: 5) ?? Data()
-                        try handle.close()
-                        guard signature == Data("%PDF-".utf8) else {
-                            DispatchQueue.main.async {
-                                self.lastFlowStatus = "CMM server returned HTTP \(httpCode), \(mime), but not PDF data. Tap OPEN DOC to retry."
-                                self.publishStatus()
-                            }
-                            return
-                        }
-                        try FileManager.default.moveItem(at: temporaryURL, to: destination)
-                    } catch {
-                        DispatchQueue.main.async {
-                            self.lastFlowStatus = "Could not save the CMM PDF: \(error.localizedDescription). Tap OPEN DOC to retry."
-                            self.publishStatus()
-                        }
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        guard let document = PDFDocument(url: destination), document.pageCount > 0 else {
-                            try? FileManager.default.removeItem(at: destination)
-                            self.lastFlowStatus = "The downloaded CMM is not a readable PDF. Tap OPEN DOC to retry."
-                            self.publishStatus()
-                            return
-                        }
-                        guard self.trainedPage > 0, self.trainedPage <= document.pageCount else {
-                            try? FileManager.default.removeItem(at: destination)
-                            self.lastFlowStatus = "Trained page \(self.trainedPage) is outside this CMM (\(document.pageCount) pages)."
-                            self.publishStatus()
-                            return
-                        }
-                        self.onPDFReady(destination, self.trainedPage, document.pageCount)
-                    }
-                }
-                self.downloadTask?.resume()
-            }
         }
 
         private func publishStatus() {
@@ -2806,10 +2685,14 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             let isDirectPDF = urlText.contains("/ppserver/services/content/pdf/")
             // Pinpoint may replace the top frame with its HTML viewer immediately
             // after acknowledgement, before the page script can open the raw PDF.
-            if acknowledgementPending && !directPDFRequested && navigationResponse.isForMainFrame,
+            if acknowledgementPending && navigationResponse.isForMainFrame,
                (urlText.contains("viewer.html") || isDirectPDF) {
                 decisionHandler(.cancel)
-                downloadTrainedPDF()
+                acknowledgementPending = false
+                lastPDFDiagnostic = ""
+                lastFlowStatus = "Acknowledgement accepted. Opening the saved CMM viewer in Pinpoint…"
+                publishStatus()
+                webView.load(URLRequest(url: trainedViewerURL))
                 return
             }
             let isPDFViewer = urlText.contains("viewer.html") || urlText.contains("/document/")
@@ -2848,9 +2731,12 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             if navigationAction.targetFrame == nil {
                 let urlText = navigationAction.request.url?.absoluteString.lowercased() ?? ""
-                if acknowledgementPending && !directPDFRequested &&
+                if acknowledgementPending &&
                    (urlText.contains("viewer.html") || urlText.contains("/ppserver/services/content/pdf/")) {
-                    downloadTrainedPDF()
+                    acknowledgementPending = false
+                    lastFlowStatus = "Acknowledgement accepted. Opening the saved CMM viewer in Pinpoint…"
+                    publishStatus()
+                    webView.load(URLRequest(url: trainedViewerURL))
                     return nil
                 }
                 if urlText.contains("viewer.html") || urlText.contains("/document/") {
