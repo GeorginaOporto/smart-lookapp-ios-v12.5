@@ -2162,12 +2162,12 @@ private struct MVDCMMPortalView: View {
             return "Press I Acknowledge in the document above. The trained page will open automatically."
         }
         if !portalLoginCompleted {
-            return "Sign in above. When Pinpoint is ready, tap OPEN DOC to open the current CMM release."
+            return "Sign in above. SmartLook will open the trained CMM automatically when Pinpoint is ready."
         }
         if status.localizedCaseInsensitiveContains("opened at trained page") {
             return "The trained CMM page is open."
         }
-        return "OPEN DOC locates the current CMM release and continues to the trained page after acknowledgement."
+        return "SmartLook opens the trained CMM automatically. Use OPEN DOC to retry if it stops."
     }
 
     var body: some View {
@@ -2207,8 +2207,7 @@ private struct MVDCMMPortalView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.blue)
-            .accessibilityHint("Opens the current CMM release; after you accept I Acknowledge, the trained page opens automatically")
-            .disabled(!portalLoginCompleted)
+            .accessibilityHint("Retries opening the trained CMM document if the automatic flow stops")
             Text(helperText)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -2222,6 +2221,24 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     let initialURL: URL
     let continueRequestID: UUID?
     let onStatus: (String) -> Void
+
+    private var trainedPDFURL: URL? {
+        guard let outer = URLComponents(url: target.url, resolvingAgainstBaseURL: false),
+              let value = outer.queryItems?.first(where: { $0.name == "file" })?.value,
+              let rawURL = URL(string: value),
+              rawURL.scheme == "https",
+              rawURL.host?.lowercased() == "aa.flatironscloud.com",
+              rawURL.path.lowercased().contains("/ppserver/services/content/pdf/") else { return nil }
+        let pageRegex = try? NSRegularExpression(pattern: #"(?:[?#&])page=(\d+)"#)
+        let original = target.url.absoluteString
+        let page = pageRegex.flatMap { regex -> Int? in
+            guard let match = regex.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)),
+                  let range = Range(match.range(at: 1), in: original) else { return nil }
+            return Int(original[range])
+        } ?? Int(target.context.pageNumber)
+        guard let page, page > 0 else { return rawURL }
+        return URL(string: rawURL.absoluteString + "#page=\(page)")
+    }
 
     private var configurationJSON: String {
         let original = target.url.absoluteString
@@ -2263,13 +2280,14 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             "page": page,
             "title": title,
             "publication": releaseTitle,
-            "trainedURL": target.url.absoluteString
+            "trainedURL": target.url.absoluteString,
+            "trainedPDFURL": trainedPDFURL?.absoluteString ?? ""
         ]
         let data = (try? JSONSerialization.data(withJSONObject: values)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onStatus: onStatus) }
+    func makeCoordinator() -> Coordinator { Coordinator(onStatus: onStatus, trainedPDFURL: trainedPDFURL) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -2285,7 +2303,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               || !location.hash.toLowerCase().startsWith('#/main')) return;
           const goal = \(configurationJSON);
           let started = false, waitingForAck = false, completed = false;
-          let lastStatus = '', readySince = 0, lastSelectionAttempt = 0;
+          let lastStatus = '', readySince = 0, lastSelectionAttempt = 0, selectedSince = 0;
           const report = text => {
             if (text === lastStatus) return;
             lastStatus = text;
@@ -2366,23 +2384,43 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             if (titleMatches.length === 1) return { link: titleMatches[0] };
             return { error: 'Could not uniquely identify the trained CMM release under ATA ' + goal.ata + '.' };
           };
+          const openTrainedPDF = () => {
+            if (!goal.trainedPDFURL) {
+              report('The training has no direct CMM PDF link. Check the saved training link.');
+              return;
+            }
+            const pdfURL = new URL(goal.trainedPDFURL, window.location.href);
+            if (pdfURL.protocol !== 'https:' || pdfURL.hostname !== 'aa.flatironscloud.com'
+                || !pdfURL.pathname.toLowerCase().includes('/ppserver/services/content/pdf/')) {
+              report('The saved CMM PDF link is not a valid Pinpoint PDF.');
+              return;
+            }
+            completed = true;
+            report('Opening trained CMM PDF at page ' + (goal.page || 'saved in the document') + '…');
+            window.location.assign(pdfURL.href);
+          };
           const tick = () => {
             if (completed) return;
             if (!document.querySelector('#libraryTree')) {
               report('Sign in to American Airlines in the embedded Pinpoint window.'); return;
             }
-            if (!started) { report('Pinpoint is ready. Tap OPEN DOC to locate the trained CMM release.'); return; }
+            if (!started) {
+              started = true;
+              report('Pinpoint is ready. Opening the trained CMM automatically…');
+            }
             const resolved = findPublication();
             if (resolved.waiting) { report(resolved.waiting); return; }
             if (resolved.error) { report(resolved.error); return; }
             const publicationLink = resolved.link;
             if (!publicationLink.classList.contains('curSelectedNode')) {
+              selectedSince = 0;
               if (Date.now() - lastSelectionAttempt > 4000) {
                 lastSelectionAttempt = Date.now(); publicationLink.click();
                 report('Opening current CMM release: ' + publicationLink.textContent.trim() + '…');
               }
               return;
             }
+            if (!selectedSince) selectedSince = Date.now();
             const frames = windows(window);
             const acknowledge = frames.some(w => Array.from(w.document.querySelectorAll('button,a,[role=button],input'))
               .some(n => visible(n) && /^i\\s+acknowledge$/i.test((n.innerText || n.value || n.textContent || '').trim())));
@@ -2391,23 +2429,17 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               report('Review Important Attachments and press I Acknowledge. The trained page will open automatically.'); return;
             }
             if (waitingForAck) {
-              waitingForAck = false; readySince = 0;
-              if (goal.trainedURL) {
-                const trainedURL = new URL(goal.trainedURL, window.location.href);
-                if (trainedURL.pathname.toLowerCase().endsWith('/viewer.html') && goal.page > 0) {
-                  const fragment = trainedURL.hash.replace(/^#/, '');
-                  if (/(^|&)page=\\d+/.test(fragment)) {
-                    trainedURL.hash = fragment.replace(/(^|&)page=\\d+/, '$1page=' + goal.page);
-                  } else {
-                    trainedURL.hash = 'page=' + goal.page;
-                  }
-                }
-                completed = true;
-                report('Acknowledgement complete. Opening trained CMM page ' + (goal.page || 'from saved link') + '…');
-                window.location.assign(trainedURL.href);
-                return;
-              }
-              report('Acknowledgement complete. Opening the trained CMM page…');
+              waitingForAck = false;
+              openTrainedPDF();
+              return;
+            }
+            // Pinpoint may remember an earlier acknowledgement for this release.
+            // Only skip the prompt when its viewer has actually opened.
+            const viewerOpen = frames.some(w => w !== window && w.location.href.includes('/viewer.html'))
+              || !!document.querySelector('iframe[src*="viewer.html"]');
+            if (viewerOpen && Date.now() - selectedSince > 3000) {
+              openTrainedPDF();
+              return;
             }
             const viewer = frames.map(w => {
               const app = w.PDFViewerApplication;
@@ -2436,7 +2468,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             completed = true; report('CMM opened at trained page ' + goal.page + '.');
           };
           window.__smartLookContinueCMM = () => {
-            started = true; waitingForAck = false; completed = false; readySince = 0;
+            started = true; waitingForAck = false; completed = false; readySince = 0; selectedSince = 0;
             tick();
           };
           tick();
@@ -2532,8 +2564,12 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         context.coordinator.onStatus = onStatus
         guard let continueRequestID, continueRequestID != context.coordinator.lastContinueRequestID else { return }
         context.coordinator.lastContinueRequestID = continueRequestID
-        view.evaluateJavaScript("window.__smartLookContinueCMM && window.__smartLookContinueCMM()") { _, error in
-            if let error { self.onStatus("Could not continue CMM navigation: \(error.localizedDescription)") }
+        context.coordinator.prepareForRetry()
+        view.evaluateJavaScript("typeof window.__smartLookContinueCMM === 'function' ? (window.__smartLookContinueCMM(), true) : false") { result, _ in
+            if (result as? Bool) != true {
+                self.onStatus("Reopening Pinpoint to retry the trained CMM…")
+                view.load(URLRequest(url: initialURL))
+            }
         }
     }
 
@@ -2546,15 +2582,33 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
+        let trainedPDFURL: URL?
         var lastContinueRequestID: UUID?
         private var lastFlowStatus = ""
         private var lastPDFDiagnostic = ""
-        init(onStatus: @escaping (String) -> Void) { self.onStatus = onStatus }
+        private var acknowledgementPending = false
+        private var directPDFRequested = false
+        init(onStatus: @escaping (String) -> Void, trainedPDFURL: URL?) {
+            self.onStatus = onStatus
+            self.trainedPDFURL = trainedPDFURL
+        }
+
+        func prepareForRetry() {
+            acknowledgementPending = false
+            directPDFRequested = false
+            lastPDFDiagnostic = ""
+        }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.securityOrigin.host.lowercased() == "aa.flatironscloud.com" else { return }
             if let text = message.body as? String {
                 lastFlowStatus = text
+                if text.contains("Review Important Attachments and press I Acknowledge") {
+                    acknowledgementPending = true
+                }
+                if text.contains("Opening trained CMM PDF") {
+                    directPDFRequested = true
+                }
             } else if let payload = message.body as? [String: Any],
                       payload["kind"] as? String == "pdfDiagnostic",
                       let detail = payload["message"] as? String {
@@ -2593,6 +2647,20 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
             let response = navigationResponse.response
             let urlText = response.url?.absoluteString.lowercased() ?? ""
+            let isDirectPDF = urlText.contains("/ppserver/services/content/pdf/")
+            if isDirectPDF { directPDFRequested = true }
+            // Pinpoint may replace the top frame with its HTML viewer immediately
+            // after acknowledgement, before the page script can open the raw PDF.
+            if acknowledgementPending && !directPDFRequested && navigationResponse.isForMainFrame,
+               urlText.contains("viewer.html"), let trainedPDFURL {
+                directPDFRequested = true
+                acknowledgementPending = false
+                lastFlowStatus = "Acknowledgement accepted. Opening the trained CMM PDF…"
+                publishStatus()
+                decisionHandler(.cancel)
+                DispatchQueue.main.async { webView.load(URLRequest(url: trainedPDFURL)) }
+                return
+            }
             let isPDFViewer = urlText.contains("viewer.html") || urlText.contains("/document/")
                 || response.mimeType?.localizedCaseInsensitiveContains("pdf") == true
             if isPDFViewer {
@@ -2600,7 +2668,13 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                 let codeText = statusCode.map(String.init) ?? "unknown"
                 let mime = response.mimeType ?? "unknown MIME"
                 DispatchQueue.main.async {
-                    self.lastFlowStatus = "CMM viewer response: HTTP \(codeText), \(mime)."
+                    if isDirectPDF && !mime.localizedCaseInsensitiveContains("pdf") {
+                        self.lastFlowStatus = "The trained CMM PDF returned HTTP \(codeText), \(mime), not PDF data. Tap OPEN DOC to retry."
+                    } else if isDirectPDF {
+                        self.lastFlowStatus = "Trained CMM PDF response: HTTP \(codeText), \(mime)."
+                    } else {
+                        self.lastFlowStatus = "CMM viewer response: HTTP \(codeText), \(mime)."
+                    }
                     self.publishStatus()
                 }
             }
@@ -2623,6 +2697,15 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             if navigationAction.targetFrame == nil {
                 let urlText = navigationAction.request.url?.absoluteString.lowercased() ?? ""
+                if acknowledgementPending && !directPDFRequested && urlText.contains("viewer.html"),
+                   let trainedPDFURL {
+                    acknowledgementPending = false
+                    directPDFRequested = true
+                    lastFlowStatus = "Acknowledgement accepted. Opening the trained CMM PDF…"
+                    publishStatus()
+                    webView.load(URLRequest(url: trainedPDFURL))
+                    return nil
+                }
                 if urlText.contains("viewer.html") || urlText.contains("/document/") {
                     lastFlowStatus = "Pinpoint opened the CMM viewer in a new window; keeping it inside SmartLookApp…"
                     publishStatus()
