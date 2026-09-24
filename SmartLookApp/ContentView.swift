@@ -2303,8 +2303,10 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const expected = compact(goal.publication || goal.title);
             const matchesTitle = a => {
               const label = compact(a.textContent);
-              return expected && label && (label.includes(expected) || expected.includes(label))
-                && (!family || label.includes(family));
+              // The model is already implied by the selected library/folder in some
+              // Pinpoint trees, so the visible release label may omit “B777”. Match
+              // by the trained release title; use model only to rank ambiguous results.
+              return expected && label && (label.includes(expected) || expected.includes(label));
             };
             let matches = [];
             if (ataLink) {
@@ -2316,7 +2318,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               }
               const children = Array.from(ataNode?.querySelectorAll('ul a') || []).filter(a => {
                 const label = compact(a.textContent);
-                return label && (!family || label.includes(family));
+                return !!label;
               });
               if (!children.length && expansionAt && Date.now() - expansionAt < 15000)
                 return { waiting: 'Loading CMM releases…' };
@@ -2328,8 +2330,10 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             // title in the tree and expand its ancestor nodes instead of stopping early.
             if (!matches.length) {
               const titled = links.filter(matchesTitle);
-              if (titled.length === 1) {
-                const candidate = titled[0];
+              const familyMatches = family ? titled.filter(a => compact(a.textContent).includes(family)) : [];
+              const ranked = familyMatches.length ? familyMatches : titled;
+              if (ranked.length === 1) {
+                const candidate = ranked[0];
                 const ancestors = [];
                 let node = candidate.closest('li');
                 while (node && node !== document.querySelector('#libraryTree')) {
@@ -2344,8 +2348,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                   }
                 }
                 matches = [candidate];
-              } else if (!ataLink) {
-                return { error: titled.length > 1
+              } else if (!ataLink || !matches.length) {
+                return { error: ranked.length > 1
                   ? 'Several Pinpoint entries match the trained CMM title. Select the correct release in Pinpoint.'
                   : 'Pinpoint does not list ATA ' + goal.ata + ' as a chapter, and no unique release matches “' + (goal.publication || goal.title) + '”.' };
               }
