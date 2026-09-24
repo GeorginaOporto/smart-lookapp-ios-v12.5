@@ -2445,6 +2445,82 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         })();
         """
         controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        let pdfDiagnostics = """
+        (() => {
+          if (location.hostname.toLowerCase() !== 'aa.flatironscloud.com') return;
+          const handler = window.webkit?.messageHandlers?.cmmFlow;
+          if (!handler) return;
+          const sent = new Set();
+          const report = text => {
+            if (!text || sent.has(text)) return;
+            sent.add(text);
+            try { handler.postMessage({ kind: 'pdfDiagnostic', message: text }); } catch (_) {}
+          };
+          const isPDFRequest = value => {
+            let probe = String(value || '');
+            for (let i = 0; i < 3; i++) {
+              if (probe.toLowerCase().includes('/ppserver/services/content/pdf/')) return true;
+              try { const decoded = decodeURIComponent(probe); if (decoded === probe) break; probe = decoded; } catch (_) { break; }
+            }
+            return false;
+          };
+          const describeResponse = (url, status, mime, length) => {
+            if (!isPDFRequest(url)) return;
+            const type = mime || 'unknown MIME';
+            report('PDF data response: HTTP ' + status + ', ' + type + (length ? ', ' + length + ' bytes' : '') + '.');
+          };
+          if (typeof window.fetch === 'function') {
+            const originalFetch = window.fetch;
+            window.fetch = function(...args) {
+              const url = args[0]?.url || args[0];
+              return originalFetch.apply(this, args).then(response => {
+                if (isPDFRequest(url)) describeResponse(url, response.status, response.headers.get('content-type'), response.headers.get('content-length'));
+                return response;
+              }, error => {
+                if (isPDFRequest(url)) report('PDF data request failed: ' + (error?.message || 'network error') + '.');
+                throw error;
+              });
+            };
+          }
+          if (window.XMLHttpRequest) {
+            const originalOpen = XMLHttpRequest.prototype.open;
+            const originalSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+              this.__smartLookPDFURL = url;
+              return originalOpen.call(this, method, url, ...rest);
+            };
+            XMLHttpRequest.prototype.send = function(...args) {
+              if (isPDFRequest(this.__smartLookPDFURL)) {
+                this.addEventListener('loadend', () => {
+                  describeResponse(this.__smartLookPDFURL, this.status, this.getResponseHeader('content-type'), this.getResponseHeader('content-length'));
+                }, { once: true });
+                this.addEventListener('error', () => report('PDF data request failed at the network layer.'), { once: true });
+              }
+              return originalSend.apply(this, args);
+            };
+          }
+          window.addEventListener('error', event => {
+            const message = String(event.message || '');
+            if (/pdf|worker|canvas|wasm/i.test(message)) report('PDF viewer script error: ' + message.slice(0, 180) + '.');
+          });
+          window.addEventListener('unhandledrejection', event => {
+            const message = String(event.reason?.message || event.reason || '');
+            if (/pdf|worker|network|fetch|http|canvas|wasm/i.test(message)) report('PDF viewer rejected: ' + message.slice(0, 180) + '.');
+          });
+          let attempts = 0;
+          const inspectViewer = () => {
+            attempts++;
+            const app = window.PDFViewerApplication;
+            if (app?.pdfDocument?.numPages) {
+              report('PDF.js loaded document: ' + app.pdfDocument.numPages + ' pages.');
+              return;
+            }
+            if (attempts < 90) window.setTimeout(inspectViewer, 1000);
+          };
+          inspectViewer();
+        })();
+        """
+        controller.addUserScript(WKUserScript(source: pdfDiagnostics, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
@@ -2471,26 +2547,45 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
         var lastContinueRequestID: UUID?
+        private var lastFlowStatus = ""
+        private var lastPDFDiagnostic = ""
         init(onStatus: @escaping (String) -> Void) { self.onStatus = onStatus }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.frameInfo.isMainFrame,
-                  message.frameInfo.securityOrigin.host == "aa.flatironscloud.com",
-                  let text = message.body as? String else { return }
+            guard message.frameInfo.securityOrigin.host.lowercased() == "aa.flatironscloud.com" else { return }
+            if let text = message.body as? String {
+                lastFlowStatus = text
+            } else if let payload = message.body as? [String: Any],
+                      payload["kind"] as? String == "pdfDiagnostic",
+                      let detail = payload["message"] as? String {
+                lastPDFDiagnostic = detail
+            } else {
+                return
+            }
+            publishStatus()
+        }
+
+        private func publishStatus() {
+            let text = [lastFlowStatus, lastPDFDiagnostic.isEmpty ? nil : lastPDFDiagnostic]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
             DispatchQueue.main.async { self.onStatus(text) }
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             let host = webView.url?.host?.lowercased() ?? ""
-            onStatus(host.contains("pfloginapp")
+            lastFlowStatus = host.contains("pfloginapp")
                 ? "Waiting for American Airlines sign-in…"
-                : "Loading Pinpoint…")
+                : "Loading Pinpoint…"
+            publishStatus()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             let currentURL = webView.url?.absoluteString.lowercased() ?? ""
             if currentURL.contains("login") {
-                onStatus("Sign in to American Airlines in the embedded Pinpoint window.")
+                lastFlowStatus = "Sign in to American Airlines in the embedded Pinpoint window."
+                publishStatus()
             }
         }
 
@@ -2505,7 +2600,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                 let codeText = statusCode.map(String.init) ?? "unknown"
                 let mime = response.mimeType ?? "unknown MIME"
                 DispatchQueue.main.async {
-                    self.onStatus("CMM viewer response: HTTP \(codeText), \(mime).")
+                    self.lastFlowStatus = "CMM viewer response: HTTP \(codeText), \(mime)."
+                    self.publishStatus()
                 }
             }
             decisionHandler(.allow)
@@ -2513,12 +2609,14 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             guard (error as NSError).code != NSURLErrorCancelled else { return }
-            onStatus("CMM link could not load: \(error.localizedDescription). Tap OPEN DOC to retry.")
+            lastFlowStatus = "CMM link could not load: \(error.localizedDescription). Tap OPEN DOC to retry."
+            publishStatus()
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             guard (error as NSError).code != NSURLErrorCancelled else { return }
-            onStatus("CMM navigation stopped: \(error.localizedDescription). Tap OPEN DOC to retry.")
+            lastFlowStatus = "CMM navigation stopped: \(error.localizedDescription). Tap OPEN DOC to retry."
+            publishStatus()
         }
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
@@ -2526,7 +2624,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             if navigationAction.targetFrame == nil {
                 let urlText = navigationAction.request.url?.absoluteString.lowercased() ?? ""
                 if urlText.contains("viewer.html") || urlText.contains("/document/") {
-                    onStatus("Pinpoint opened the CMM viewer in a new window; keeping it inside SmartLookApp…")
+                    lastFlowStatus = "Pinpoint opened the CMM viewer in a new window; keeping it inside SmartLookApp…"
+                    publishStatus()
                 }
                 webView.load(navigationAction.request)
             }
