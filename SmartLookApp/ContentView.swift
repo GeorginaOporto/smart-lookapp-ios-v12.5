@@ -2262,7 +2262,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             "model": target.context.model,
             "page": page,
             "title": title,
-            "publication": releaseTitle
+            "publication": releaseTitle,
+            "trainedURL": target.url.absoluteString
         ]
         let data = (try? JSONSerialization.data(withJSONObject: values)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
@@ -2277,7 +2278,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         controller.add(context.coordinator, name: "cmmFlow")
         let script = """
         (() => {
-          if (location.hostname !== 'aa.flatironscloud.com' || window !== window.top) return;
+          if (location.hostname !== 'aa.flatironscloud.com' || window !== window.top
+              || !location.hash.toLowerCase().startsWith('#/main')) return;
           const goal = \(configurationJSON);
           let started = false, waitingForAck = false, completed = false;
           let lastStatus = '', readySince = 0, lastSelectionAttempt = 0;
@@ -2387,6 +2389,21 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             }
             if (waitingForAck) {
               waitingForAck = false; readySince = 0;
+              if (goal.trainedURL) {
+                const trainedURL = new URL(goal.trainedURL, window.location.href);
+                if (trainedURL.pathname.toLowerCase().endsWith('/viewer.html') && goal.page > 0) {
+                  const fragment = trainedURL.hash.replace(/^#/, '');
+                  if (/(^|&)page=\\d+/.test(fragment)) {
+                    trainedURL.hash = fragment.replace(/(^|&)page=\\d+/, '$1page=' + goal.page);
+                  } else {
+                    trainedURL.hash = 'page=' + goal.page;
+                  }
+                }
+                completed = true;
+                report('Acknowledgement complete. Opening trained CMM page ' + (goal.page || 'from saved link') + '…');
+                window.location.assign(trainedURL.href);
+                return;
+              }
               report('Acknowledgement complete. Opening the trained CMM page…');
             }
             const viewer = frames.map(w => {
