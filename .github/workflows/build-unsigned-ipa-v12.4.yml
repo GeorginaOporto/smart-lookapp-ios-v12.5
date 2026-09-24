@@ -2,12 +2,6 @@ name: Build SmartLookApp iOS v12.4 unsigned IPA
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "SmartLookApp/**"
-      - "SmartLookApp.xcodeproj/**"
-      - "Podfile"
-      - ".github/workflows/build-unsigned-ipa-v12.4.yml"
 
 permissions:
   contents: write
