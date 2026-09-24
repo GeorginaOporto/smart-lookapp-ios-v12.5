@@ -2269,7 +2269,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
           if (location.hostname !== 'aa.flatironscloud.com' || window !== window.top) return;
           const goal = \(configurationJSON);
           let started = false, waitingForAck = false, completed = false;
-          let lastStatus = '', readySince = 0, lastSelectionAttempt = 0, expansionAt = 0;
+          let lastStatus = '', readySince = 0, lastSelectionAttempt = 0;
           const report = text => {
             if (text === lastStatus) return;
             lastStatus = text;
@@ -2288,75 +2288,56 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             }
             return all;
           };
-          const modelFamily = () => {
-            const match = compact(goal.model).match(/(777|787|767|757|747|737|320|321|319)/);
-            if (!match) return '';
-            return (['320', '321', '319'].includes(match[1]) ? 'a' : 'b') + match[1];
-          };
           const findPublication = () => {
-            const ata = compact(goal.ata).replace(/[^0-9]/g, '').slice(0, 6);
-            if (ata.length < 4) return { error: 'Training does not contain a complete CMM ATA.' };
-            const links = Array.from(document.querySelectorAll('#libraryTree a'));
-            let ataLink = links.find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata)
-              || links.find(a => compact(a.textContent).replace(/[^0-9]/g, '') === ata.slice(0, 4));
-            const family = modelFamily();
-            const expected = compact(goal.publication || goal.title);
-            const matchesTitle = a => {
-              const label = compact(a.textContent);
-              // The model is already implied by the selected library/folder in some
-              // Pinpoint trees, so the visible release label may omit “B777”. Match
-              // by the trained release title; use model only to rank ambiguous results.
-              return expected && label && (label.includes(expected) || expected.includes(label));
-            };
-            let matches = [];
-            if (ataLink) {
-              const ataNode = ataLink.closest('li');
-              const switcher = ataNode?.querySelector(':scope > span[treenode_switch]');
+            const tree = document.querySelector('#libraryTree');
+            const ata = compact(goal.ata).replace(/[^0-9]/g, '');
+            if (!tree || ata.length < 6) return { error: 'Training does not contain a complete CMM ATA.' };
+            const allLinks = root => Array.from(root.querySelectorAll('a'));
+            const labelOf = a => compact(a.textContent);
+            const nodeFor = (root, predicate) => allLinks(root).find(a => predicate(labelOf(a)));
+            const openNode = (link, status) => {
+              const switcher = link.closest('li')?.querySelector(':scope > span[treenode_switch]');
               if (switcher?.classList.contains('center_close')) {
-                expansionAt = Date.now(); switcher.click();
-                return { waiting: 'Opening the CMM chapter in Pinpoint…' };
+                switcher.click();
+                return { waiting: status };
               }
-              const children = Array.from(ataNode?.querySelectorAll('ul a') || []).filter(a => {
-                const label = compact(a.textContent);
-                return !!label;
-              });
-              if (!children.length && expansionAt && Date.now() - expansionAt < 15000)
-                return { waiting: 'Loading CMM releases…' };
-              matches = children.filter(matchesTitle);
-              if (!matches.length && children.length === 1) matches = children;
-            }
-            // Pinpoint does not expose every CMM ATA as a separate tree node in every
-            // publication. If the ATA lookup misses, locate the exact trained release
-            // title in the tree and expand its ancestor nodes instead of stopping early.
-            if (!matches.length) {
-              const titled = links.filter(matchesTitle);
-              const familyMatches = family ? titled.filter(a => compact(a.textContent).includes(family)) : [];
-              const ranked = familyMatches.length ? familyMatches : titled;
-              if (ranked.length === 1) {
-                const candidate = ranked[0];
-                const ancestors = [];
-                let node = candidate.closest('li');
-                while (node && node !== document.querySelector('#libraryTree')) {
-                  ancestors.push(node);
-                  node = node.parentElement?.closest('li');
-                }
-                for (const ancestor of ancestors.reverse()) {
-                  const switcher = ancestor.querySelector(':scope > span[treenode_switch]');
-                  if (switcher?.classList.contains('center_close')) {
-                    expansionAt = Date.now(); switcher.click();
-                    return { waiting: 'Opening the matching CMM release in Pinpoint…' };
-                  }
-                }
-                matches = [candidate];
-              } else if (!ataLink || !matches.length) {
-                return { error: ranked.length > 1
-                  ? 'Several Pinpoint entries match the trained CMM title. Select the correct release in Pinpoint.'
-                  : 'Pinpoint does not list ATA ' + goal.ata + ' as a chapter, and no unique release matches “' + (goal.publication || goal.title) + '”.' };
-              }
-            }
-            expansionAt = 0;
-            if (matches.length !== 1) return { error: 'More than one CMM release matches. Select the correct release in Pinpoint.' };
-            return { link: matches[0] };
+              return null;
+            };
+            const descendant = (rootLink, predicate) => {
+              const node = rootLink.closest('li');
+              return node ? nodeFor(node, predicate) : null;
+            };
+            const components = nodeFor(tree, label => label === 'components');
+            if (!components) return { waiting: 'Opening Components in the Pinpoint library…' };
+            const openingComponents = openNode(components, 'Opening Components in Pinpoint…');
+            if (openingComponents) return openingComponents;
+
+            const addendum = descendant(components, label => label.includes('01aaipcaddendum') || label === 'aaipcaddendum');
+            if (!addendum) return { waiting: 'Opening 01 AA IPC Addendum…' };
+            const openingAddendum = openNode(addendum, 'Opening 01 AA IPC Addendum…');
+            if (openingAddendum) return openingAddendum;
+
+            const chapterDigits = ata.slice(0, 4);
+            const chapter = descendant(addendum, label => label.replace(/[^0-9]/g, '') === chapterDigits);
+            if (!chapter) return { waiting: 'Opening CMM chapter ' + chapterDigits.slice(0, 2) + '-' + chapterDigits.slice(2) + '…' };
+            const openingChapter = openNode(chapter, 'Opening CMM chapter ' + chapterDigits.slice(0, 2) + '-' + chapterDigits.slice(2) + '…');
+            if (openingChapter) return openingChapter;
+
+            const ataFolder = descendant(chapter, label => label.replace(/[^0-9]/g, '') === ata);
+            if (!ataFolder) return { waiting: 'Opening CMM ATA ' + goal.ata + '…' };
+            const openingATA = openNode(ataFolder, 'Opening CMM ATA ' + goal.ata + '…');
+            if (openingATA) return openingATA;
+
+            const expected = compact(goal.publication || goal.title);
+            const releases = allLinks(ataFolder.closest('li')).filter(a => {
+              if (a === ataFolder) return false;
+              const label = labelOf(a);
+              // The model may be implicit in the selected library, so Pinpoint's
+              // release title may omit “B777”; constrain matching to this exact ATA branch.
+              return expected && label && (label.includes(expected) || expected.includes(label));
+            });
+            if (releases.length !== 1) return { waiting: 'Locating the trained CMM release under ATA ' + goal.ata + '…' };
+            return { link: releases[0] };
           };
           const tick = () => {
             if (completed) return;
