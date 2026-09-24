@@ -2340,7 +2340,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             const releases = allLinks(ataFolder.closest('li')).filter(a => {
               if (a === ataFolder) return false;
               const label = labelOf(a);
-              return label && label.includes('beaerospace') && label.includes(ata);
+              const supportedSupplier = label.includes('beaerospace') || label.includes('safranseatsusa');
+              return label && supportedSupplier && label.includes(ata);
             });
             const modelNumber = compact(goal.model).match(/(777|787)/)?.[1]
               || compact(goal.publication || goal.title).match(/b(777|787)/)?.[1]
