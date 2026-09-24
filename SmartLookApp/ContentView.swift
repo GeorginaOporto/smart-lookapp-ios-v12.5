@@ -2240,10 +2240,21 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             .replacingOccurrences(of: "_", with: " ")
             .removingPercentEncoding ?? title
         let pageRegex = try? NSRegularExpression(pattern: #"(?:[?#&])page=(\d+)"#)
-        let pageMatch = pageRegex?.firstMatch(in: original, range: NSRange(original.startIndex..., in: original))
         var page = 0
-        if let pageMatch, let range = Range(pageMatch.range(at: 1), in: original) {
-            page = Int(original[range]) ?? 0
+        var pageSources = [original]
+        var decodedURL = original
+        for _ in 0..<3 {
+            guard let next = decodedURL.removingPercentEncoding, next != decodedURL else { break }
+            pageSources.append(next)
+            decodedURL = next
+        }
+        for source in pageSources {
+            guard let pageRegex,
+                  let pageMatch = pageRegex.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+                  let range = Range(pageMatch.range(at: 1), in: source),
+                  let parsedPage = Int(source[range]), parsedPage > 0 else { continue }
+            page = parsedPage
+            break
         }
         if page == 0 { page = Int(target.context.pageNumber) ?? 0 }
         let values: [String: Any] = [
@@ -2389,7 +2400,16 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             if (goal.page < 1 || goal.page > viewer.pdfDocument.numPages) {
               completed = true; report('Trained page is outside this CMM release. Verify the training page.'); return;
             }
-            if (viewer.page !== goal.page) { viewer.page = goal.page; return; }
+            if (viewer.page !== goal.page) {
+              report('Loading trained CMM page ' + goal.page + ' of ' + viewer.pdfDocument.numPages + '…');
+              try { viewer.page = goal.page; } catch (_) {}
+              try { if (viewer.page !== goal.page && viewer.pdfViewer) viewer.pdfViewer.currentPageNumber = goal.page; } catch (_) {}
+              return;
+            }
+            const trainedPageView = viewer.pdfViewer?.getPageView?.(goal.page - 1);
+            if (trainedPageView && trainedPageView.renderingState !== 3) {
+              report('Rendering trained CMM page ' + goal.page + ' of ' + viewer.pdfDocument.numPages + '…'); return;
+            }
             completed = true; report('CMM opened at trained page ' + goal.page + '.');
           };
           window.__smartLookContinueCMM = () => {
