@@ -2846,7 +2846,13 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                         let mime = http?.mimeType?.lowercased() ?? ""
                         guard let http, (200...299).contains(http.statusCode),
                               mime.isEmpty || mime.contains("pdf") || mime.contains("octet-stream") else {
-                            self.lastFlowStatus = "Authenticated CMM request returned HTTP \(http?.statusCode ?? -1), \(mime.isEmpty ? "unknown MIME" : mime)."
+                            var detail = ""
+                            if let location, let bodyData = try? Data(contentsOf: location), !bodyData.isEmpty {
+                                let text = String(data: bodyData, encoding: .utf8) ?? ""
+                                if !text.isEmpty { detail = " Body: " + String(text.prefix(300)) }
+                                try? FileManager.default.removeItem(at: location)
+                            }
+                            self.lastFlowStatus = "Authenticated CMM request returned HTTP \(http?.statusCode ?? -1), \(mime.isEmpty ? "unknown MIME" : mime).\(detail)"
                             self.resetPDFTransfer(removeFile: true)
                             self.publishStatus()
                             return
