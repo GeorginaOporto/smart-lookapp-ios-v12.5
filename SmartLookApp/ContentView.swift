@@ -7,6 +7,7 @@ import ImageIO
 import CoreImage
 import WebKit
 import MessageUI
+import PDFKit
 
 // MARK: - Sanitized MVD session
 
@@ -2156,6 +2157,8 @@ private struct MVDCMMPortalView: View {
     @Binding var status: String
     @Binding var portalLoginCompleted: Bool
     @State private var continueRequestID: UUID?
+    @State private var nativePDFURL: URL?
+    @State private var nativePDFPage = 0
 
     private var helperText: String {
         if status.localizedCaseInsensitiveContains("acknowledge") {
@@ -2178,41 +2181,80 @@ private struct MVDCMMPortalView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
 
-            MVDCMMPortalWebView(
-                target: target,
-                initialURL: initialURL,
-                continueRequestID: continueRequestID,
-                onStatus: { newStatus in
-                    status = newStatus
-                    if newStatus.hasPrefix("Pinpoint is ready") {
-                        portalLoginCompleted = true
-                    } else if newStatus.localizedCaseInsensitiveContains("sign in to American Airlines") {
-                        portalLoginCompleted = false
-                    }
+            Group {
+                if let nativePDFURL {
+                    MVDLocalCMMDocumentView(fileURL: nativePDFURL, page: nativePDFPage)
+                } else {
+                    MVDCMMPortalWebView(
+                        target: target,
+                        initialURL: initialURL,
+                        continueRequestID: continueRequestID,
+                        onStatus: { newStatus in
+                            status = newStatus
+                            if newStatus.hasPrefix("Pinpoint is ready") {
+                                portalLoginCompleted = true
+                            } else if newStatus.localizedCaseInsensitiveContains("sign in to American Airlines") {
+                                portalLoginCompleted = false
+                            }
+                        },
+                        onPDFReady: { url, page in
+                            nativePDFPage = page
+                            nativePDFURL = url
+                            status = "CMM loaded in the native PDF viewer."
+                        }
+                    )
                 }
-            )
+            }
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.blue.opacity(0.55)))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Button {
-                status = status.localizedCaseInsensitiveContains("acknowledge")
-                    ? "Continuing to the trained CMM page…"
-                    : "Locating the trained CMM release…"
-                continueRequestID = UUID()
-            } label: {
-                Text("OPEN DOC")
-                    .font(.headline.weight(.bold))
-                    .frame(width: 142, height: 48)
+            if nativePDFURL == nil {
+                Button {
+                    status = status.localizedCaseInsensitiveContains("acknowledge")
+                        ? "Continuing to the trained CMM page…"
+                        : "Locating the trained CMM release…"
+                    continueRequestID = UUID()
+                } label: {
+                    Text("OPEN DOC")
+                        .font(.headline.weight(.bold))
+                        .frame(width: 142, height: 48)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .accessibilityHint("Retries opening the trained CMM document if the automatic flow stops")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .accessibilityHint("Retries opening the trained CMM document if the automatic flow stops")
-            Text(helperText)
+            Text(nativePDFURL == nil ? helperText : "The trained document is open in PDFKit.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
+        .onDisappear {
+            if let nativePDFURL { try? FileManager.default.removeItem(at: nativePDFURL) }
+        }
+    }
+}
+
+private struct MVDLocalCMMDocumentView: UIViewRepresentable {
+    let fileURL: URL
+    let page: Int
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        if let document = PDFDocument(url: fileURL) {
+            view.document = document
+            if page > 0, let trainedPage = document.page(at: page - 1) { view.go(to: trainedPage) }
+        }
+        return view
+    }
+
+    func updateUIView(_ view: PDFView, context: Context) {
+        guard view.document?.documentURL != fileURL,
+              let document = PDFDocument(url: fileURL) else { return }
+        view.document = document
+        if page > 0, let trainedPage = document.page(at: page - 1) { view.go(to: trainedPage) }
     }
 }
 
@@ -2221,6 +2263,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     let initialURL: URL
     let continueRequestID: UUID?
     let onStatus: (String) -> Void
+    let onPDFReady: (URL, Int) -> Void
 
     private var configurationJSON: String {
         let original = target.url.absoluteString
@@ -2267,7 +2310,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onStatus: onStatus) }
+    func makeCoordinator() -> Coordinator { Coordinator(onStatus: onStatus, onPDFReady: onPDFReady) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -2546,16 +2589,79 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               || !location.pathname.toLowerCase().endsWith('/viewer.html')) return;
           const goal = \(configurationJSON);
           const handler = window.webkit?.messageHandlers?.cmmFlow;
-          let lastStatus = '', attempts = 0, finished = false;
+          let lastStatus = '', attempts = 0, finished = false, nativeTransferStarted = false;
           const report = text => {
             if (text === lastStatus) return;
             lastStatus = text;
             try { handler?.postMessage(text); } catch (_) {}
           };
+          const beginNativePDFTransfer = async () => {
+            if (nativeTransferStarted || !viewerSource) return;
+            nativeTransferStarted = true;
+            let source;
+            try { source = new URL(viewerSource, location.href); }
+            catch (_) { report('Cannot read the PDF source URL from the Pinpoint viewer.'); return; }
+            if (source.hostname.toLowerCase() !== 'aa.flatironscloud.com'
+                || !source.pathname.toLowerCase().includes('/ppserver/services/content/pdf/')) {
+              report('Pinpoint viewer source is not an approved AA CMM PDF endpoint.'); return;
+            }
+            report('PDF.js has no document; requesting the CMM through the authenticated Pinpoint session…');
+            try {
+              const response = await fetch(source.href, {
+                credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }
+              });
+              const mime = response.headers.get('content-type') || 'unknown MIME';
+              if (!response.ok || !/pdf|octet-stream/i.test(mime)) {
+                try { await response.body?.cancel(); } catch (_) {}
+                report('Authenticated CMM request returned HTTP ' + response.status + ', ' + mime + '.'); return;
+              }
+              if (!response.body?.getReader) {
+                report('Authenticated CMM response cannot be streamed to the native PDF viewer.'); return;
+              }
+              const reader = response.body.getReader();
+              const first = await reader.read();
+              if (first.done) { report('Pinpoint returned an empty CMM PDF response.'); return; }
+              let initialBytes = first.value;
+              while (initialBytes.length < 5) {
+                const next = await reader.read();
+                if (next.done) break;
+                const joined = new Uint8Array(initialBytes.length + next.value.length);
+                joined.set(initialBytes); joined.set(next.value, initialBytes.length); initialBytes = joined;
+              }
+              if (initialBytes.length < 5 || String.fromCharCode(...initialBytes.slice(0, 5)) !== '%PDF-') {
+                try { await reader.cancel(); } catch (_) {}
+                report('Pinpoint returned a non-PDF body to the authenticated viewer.'); return;
+              }
+              try { handler?.postMessage({ kind: 'nativePDFStart', page: Number(goal.page || 0) }); } catch (_) {}
+              let transferred = 0, index = 0;
+              const sendChunk = bytes => {
+                let binary = '';
+                for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+                  binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+                }
+                const encoded = btoa(binary);
+                handler?.postMessage({ kind: 'nativePDFChunk', index: index++, data: encoded });
+                transferred += bytes.length;
+                if (transferred > 0 && transferred % (5 * 1024 * 1024) < bytes.length) {
+                  report('Receiving authenticated CMM PDF (' + Math.round(transferred / 1048576) + ' MB)…');
+                }
+              };
+              sendChunk(initialBytes);
+              while (true) {
+                const next = await reader.read();
+                if (next.done) break;
+                if (next.value?.length) sendChunk(next.value);
+              }
+              handler?.postMessage({ kind: 'nativePDFEnd', bytes: transferred, page: Number(goal.page || 0) });
+            } catch (error) {
+              report('Authenticated CMM PDF request failed: ' + String(error?.message || error).slice(0, 150) + '.');
+            }
+          };
           const navigateToTrainedPage = () => {
             if (finished) return;
             const app = window.PDFViewerApplication;
             if (!app?.pdfDocument || !app.pdfViewer) {
+              if (attempts === 14) beginNativePDFTransfer();
               if (++attempts < 240) window.setTimeout(navigateToTrainedPage, 1000);
               else report('Pinpoint viewer is still loading the CMM PDF. Use OPEN DOC to retry.');
               return;
@@ -2600,6 +2706,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.onStatus = onStatus
+        context.coordinator.onPDFReady = onPDFReady
         guard let continueRequestID, continueRequestID != context.coordinator.lastContinueRequestID else { return }
         context.coordinator.lastContinueRequestID = continueRequestID
         context.coordinator.prepareForRetry()
@@ -2613,6 +2720,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         view.stopLoading()
+        coordinator.closeTransferHandle()
         view.configuration.userContentController.removeScriptMessageHandler(forName: "cmmFlow")
         view.navigationDelegate = nil
         view.uiDelegate = nil
@@ -2620,13 +2728,114 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
+        var onPDFReady: (URL, Int) -> Void
         var lastContinueRequestID: UUID?
         private var lastFlowStatus = ""
         private var lastPDFDiagnostic = ""
-        init(onStatus: @escaping (String) -> Void) { self.onStatus = onStatus }
+        private var transferURL: URL?
+        private var transferHandle: FileHandle?
+        private var transferNextChunk = 0
+        private var transferPage = 0
+        private var transferReceivedBytes = 0
+
+        init(onStatus: @escaping (String) -> Void, onPDFReady: @escaping (URL, Int) -> Void) {
+            self.onStatus = onStatus
+            self.onPDFReady = onPDFReady
+        }
 
         func prepareForRetry() {
             lastPDFDiagnostic = ""
+            resetPDFTransfer(removeFile: true)
+        }
+
+        func closeTransferHandle() {
+            try? transferHandle?.close()
+            transferHandle = nil
+        }
+
+        private func resetPDFTransfer(removeFile: Bool) {
+            closeTransferHandle()
+            if removeFile, let transferURL { try? FileManager.default.removeItem(at: transferURL) }
+            transferURL = nil
+            transferNextChunk = 0
+            transferPage = 0
+            transferReceivedBytes = 0
+        }
+
+        private func receivePDFTransferMessage(_ payload: [String: Any]) {
+            guard let kind = payload["kind"] as? String else { return }
+            switch kind {
+            case "nativePDFStart":
+                resetPDFTransfer(removeFile: true)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("SmartLook-CMM-\(UUID().uuidString).pdf")
+                guard FileManager.default.createFile(atPath: url.path, contents: nil),
+                      let handle = try? FileHandle(forWritingTo: url) else {
+                    lastFlowStatus = "Could not create a temporary file for the authenticated CMM PDF."
+                    publishStatus()
+                    return
+                }
+                transferURL = url
+                transferHandle = handle
+                transferPage = payload["page"] as? Int ?? 0
+                transferNextChunk = 0
+                transferReceivedBytes = 0
+                lastFlowStatus = "Receiving the PDF from the authenticated Pinpoint session…"
+                publishStatus()
+            case "nativePDFChunk":
+                guard let dataText = payload["data"] as? String,
+                      let index = payload["index"] as? Int,
+                      index == transferNextChunk,
+                      let data = Data(base64Encoded: dataText),
+                      let transferHandle else {
+                    lastFlowStatus = "The authenticated CMM PDF transfer was interrupted. Tap OPEN DOC to retry."
+                    resetPDFTransfer(removeFile: true)
+                    publishStatus()
+                    return
+                }
+                do {
+                    try transferHandle.write(contentsOf: data)
+                    transferReceivedBytes += data.count
+                    transferNextChunk += 1
+                } catch {
+                    lastFlowStatus = "Could not save the authenticated CMM PDF: \(error.localizedDescription)."
+                    resetPDFTransfer(removeFile: true)
+                    publishStatus()
+                }
+            case "nativePDFEnd":
+                guard let transferURL, let transferHandle,
+                      payload["bytes"] as? Int == transferReceivedBytes else {
+                    lastFlowStatus = "The authenticated CMM PDF transfer ended incomplete. Tap OPEN DOC to retry."
+                    resetPDFTransfer(removeFile: true)
+                    publishStatus()
+                    return
+                }
+                try? transferHandle.close()
+                self.transferHandle = nil
+                guard let document = PDFDocument(url: transferURL), document.pageCount > 0 else {
+                    lastFlowStatus = "Pinpoint data was received, but it is not a readable PDF."
+                    resetPDFTransfer(removeFile: true)
+                    publishStatus()
+                    return
+                }
+                let page = transferPage
+                guard page == 0 || (page > 0 && page <= document.pageCount) else {
+                    lastFlowStatus = "Trained page \(page) is outside this CMM PDF (\(document.pageCount) pages)."
+                    resetPDFTransfer(removeFile: true)
+                    publishStatus()
+                    return
+                }
+                lastFlowStatus = "Authenticated CMM PDF received (\(document.pageCount) pages); opening native viewer…"
+                publishStatus()
+                DispatchQueue.main.async { self.onPDFReady(transferURL, page) }
+            case "nativePDFProgress":
+                if let bytes = payload["bytes"] as? Int {
+                    lastFlowStatus = "Receiving authenticated CMM PDF (\(bytes / 1_048_576) MB)…"
+                    publishStatus()
+                }
+            default:
+                break
+            }
         }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -2637,6 +2846,11 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                       payload["kind"] as? String == "pdfDiagnostic",
                       let detail = payload["message"] as? String {
                 lastPDFDiagnostic = detail
+            } else if let payload = message.body as? [String: Any],
+                      ["nativePDFStart", "nativePDFChunk", "nativePDFEnd", "nativePDFProgress"].contains(payload["kind"] as? String ?? "") {
+                guard message.frameInfo.request.url?.path.lowercased().hasSuffix("/viewer.html") == true else { return }
+                receivePDFTransferMessage(payload)
+                return
             } else {
                 return
             }
