@@ -2613,10 +2613,14 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               const mime = response.headers.get('content-type') || 'unknown MIME';
               if (!response.ok || !/pdf|octet-stream/i.test(mime)) {
                 try { await response.body?.cancel(); } catch (_) {}
-                report('Authenticated CMM request returned HTTP ' + response.status + ', ' + mime + '.'); return;
+                report('Authenticated CMM request returned HTTP ' + response.status + ', ' + mime + '; trying the integrated WebKit PDF reader…');
+                try { handler?.postMessage({ kind: 'nativeWebKitPDF', url: source.href, page: Number(goal.page || 0) }); } catch (_) {}
+                return;
               }
               if (!response.body?.getReader) {
-                report('Authenticated CMM response cannot be streamed to the native PDF viewer.'); return;
+                report('Authenticated CMM response cannot be streamed; trying the integrated WebKit PDF reader…');
+                try { handler?.postMessage({ kind: 'nativeWebKitPDF', url: source.href, page: Number(goal.page || 0) }); } catch (_) {}
+                return;
               }
               const reader = response.body.getReader();
               const first = await reader.read();
@@ -2654,7 +2658,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               }
               handler?.postMessage({ kind: 'nativePDFEnd', bytes: transferred, page: Number(goal.page || 0) });
             } catch (error) {
-              report('Authenticated CMM PDF request failed: ' + String(error?.message || error).slice(0, 150) + '.');
+              report('Authenticated CMM PDF transfer failed; trying the integrated WebKit PDF reader…');
+              try { handler?.postMessage({ kind: 'nativeWebKitPDF', url: source.href, page: Number(goal.page || 0) }); } catch (_) {}
             }
           };
           const navigateToTrainedPage = () => {
@@ -2729,6 +2734,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         var onStatus: (String) -> Void
         var onPDFReady: (URL, Int) -> Void
+        weak var webView: WKWebView?
         var lastContinueRequestID: UUID?
         private var lastFlowStatus = ""
         private var lastPDFDiagnostic = ""
@@ -2847,6 +2853,24 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                       let detail = payload["message"] as? String {
                 lastPDFDiagnostic = detail
             } else if let payload = message.body as? [String: Any],
+                      payload["kind"] as? String == "nativeWebKitPDF",
+                      let sourceText = payload["url"] as? String,
+                      let source = URLComponents(string: sourceText),
+                      source.scheme?.lowercased() == "https",
+                      source.host?.lowercased() == "aa.flatironscloud.com",
+                      source.path.lowercased().contains("/ppserver/services/content/pdf/") {
+                var readerURL = source
+                if let page = payload["page"] as? Int, page > 0 {
+                    readerURL.fragment = "page=\(page)"
+                }
+                guard let integratedReaderURL = readerURL.url else { return }
+                lastFlowStatus = "Opening the authenticated CMM in the integrated WebKit PDF reader…"
+                publishStatus()
+                DispatchQueue.main.async { [weak self] in
+                    self?.webView?.load(URLRequest(url: integratedReaderURL, cachePolicy: .reloadIgnoringLocalCacheData))
+                }
+                return
+            } else if let payload = message.body as? [String: Any],
                       ["nativePDFStart", "nativePDFChunk", "nativePDFEnd", "nativePDFProgress"].contains(payload["kind"] as? String ?? "") {
                 guard message.frameInfo.request.url?.path.lowercased().hasSuffix("/viewer.html") == true else { return }
                 receivePDFTransferMessage(payload)
@@ -2866,6 +2890,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            self.webView = webView
             let host = webView.url?.host?.lowercased() ?? ""
             lastFlowStatus = host.contains("pfloginapp")
                 ? "Waiting for American Airlines sign-in…"
