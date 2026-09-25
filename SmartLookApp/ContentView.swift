@@ -2811,76 +2811,85 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
         }
 
         /// Downloads the authenticated CMM PDF directly with URLSession instead of
-        /// relaying it through the JS bridge as base64 chunks. `WKWebsiteDataStore
-        /// .default()` (used by this web view) shares its cookies with
-        /// `HTTPCookieStorage.shared`, so a plain URLSession request carries the same
-        /// Pinpoint session the WKWebView is authenticated with, without needing the
-        /// page's own JS `fetch` at all. This avoids the fragile chunk-relay path
-        /// (hundreds of postMessage round trips for a large CMM) entirely.
+        /// relaying it through the JS bridge as base64 chunks — avoiding the fragile
+        /// chunk-relay path (hundreds of postMessage round trips for a large CMM)
+        /// entirely. Since iOS 11.3, WKWebView's cookies are NOT reliably mirrored
+        /// into `HTTPCookieStorage.shared` automatically (this sync only ever
+        /// reliably worked in the other direction), so we read the Pinpoint session
+        /// cookies straight from the WKWebView's own `WKWebsiteDataStore` and attach
+        /// them to the request by hand rather than depending on any OS-level sync.
         private func downloadPDFNatively(from sourceURL: URL, page: Int) {
-            var request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalCacheData)
-            request.setValue("application/pdf", forHTTPHeaderField: "Accept")
-            request.setValue("https://aa.flatironscloud.com/", forHTTPHeaderField: "Referer")
-            let configuration = URLSessionConfiguration.default
-            configuration.httpCookieStorage = HTTPCookieStorage.shared
-            configuration.httpShouldSetCookies = true
-            let session = URLSession(configuration: configuration)
-            let task = session.downloadTask(with: request) { [weak self] location, response, error in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self else { return }
-                DispatchQueue.main.async {
-                    if let error {
-                        self.lastFlowStatus = "Authenticated CMM download failed: \(error.localizedDescription)."
-                        self.resetPDFTransfer(removeFile: true)
-                        self.publishStatus()
-                        return
-                    }
-                    let http = response as? HTTPURLResponse
-                    let mime = http?.mimeType?.lowercased() ?? ""
-                    guard let http, (200...299).contains(http.statusCode),
-                          mime.isEmpty || mime.contains("pdf") || mime.contains("octet-stream") else {
-                        self.lastFlowStatus = "Authenticated CMM request returned HTTP \(http?.statusCode ?? -1), \(mime.isEmpty ? "unknown MIME" : mime)."
-                        self.resetPDFTransfer(removeFile: true)
-                        self.publishStatus()
-                        return
-                    }
-                    guard let tempLocation = location else {
-                        self.lastFlowStatus = "Pinpoint returned an empty CMM PDF response."
-                        self.resetPDFTransfer(removeFile: true)
-                        self.publishStatus()
-                        return
-                    }
-                    let destination = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("SmartLook-CMM-\(UUID().uuidString).pdf")
-                    do {
-                        if FileManager.default.fileExists(atPath: destination.path) {
-                            try FileManager.default.removeItem(at: destination)
-                        }
-                        try FileManager.default.moveItem(at: tempLocation, to: destination)
-                    } catch {
-                        self.lastFlowStatus = "Could not save the authenticated CMM PDF: \(error.localizedDescription)."
-                        self.resetPDFTransfer(removeFile: true)
-                        self.publishStatus()
-                        return
-                    }
-                    self.transferURL = destination
-                    guard let document = PDFDocument(url: destination), document.pageCount > 0 else {
-                        self.lastFlowStatus = "Pinpoint data was received, but it is not a readable PDF."
-                        self.resetPDFTransfer(removeFile: true)
-                        self.publishStatus()
-                        return
-                    }
-                    guard page == 0 || (page > 0 && page <= document.pageCount) else {
-                        self.lastFlowStatus = "Trained page \(page) is outside this CMM PDF (\(document.pageCount) pages)."
-                        self.resetPDFTransfer(removeFile: true)
-                        self.publishStatus()
-                        return
-                    }
-                    self.lastFlowStatus = "Authenticated CMM PDF received (\(document.pageCount) pages); opening native viewer…"
-                    self.publishStatus()
-                    self.onPDFReady(destination, page)
+                let relevantCookies = cookies.filter { cookie in
+                    sourceURL.host?.lowercased().hasSuffix(cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))) == true
                 }
+                var request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalCacheData)
+                request.setValue("application/pdf", forHTTPHeaderField: "Accept")
+                request.setValue("https://aa.flatironscloud.com/", forHTTPHeaderField: "Referer")
+                for (field, value) in HTTPCookie.requestHeaderFields(with: relevantCookies) {
+                    request.setValue(value, forHTTPHeaderField: field)
+                }
+                let configuration = URLSessionConfiguration.default
+                configuration.httpCookieStorage = HTTPCookieStorage.shared
+                configuration.httpShouldSetCookies = true
+                let session = URLSession(configuration: configuration)
+                let task = session.downloadTask(with: request) { location, response, error in
+                    DispatchQueue.main.async {
+                        if let error {
+                            self.lastFlowStatus = "Authenticated CMM download failed: \(error.localizedDescription)."
+                            self.resetPDFTransfer(removeFile: true)
+                            self.publishStatus()
+                            return
+                        }
+                        let http = response as? HTTPURLResponse
+                        let mime = http?.mimeType?.lowercased() ?? ""
+                        guard let http, (200...299).contains(http.statusCode),
+                              mime.isEmpty || mime.contains("pdf") || mime.contains("octet-stream") else {
+                            self.lastFlowStatus = "Authenticated CMM request returned HTTP \(http?.statusCode ?? -1), \(mime.isEmpty ? "unknown MIME" : mime)."
+                            self.resetPDFTransfer(removeFile: true)
+                            self.publishStatus()
+                            return
+                        }
+                        guard let tempLocation = location else {
+                            self.lastFlowStatus = "Pinpoint returned an empty CMM PDF response."
+                            self.resetPDFTransfer(removeFile: true)
+                            self.publishStatus()
+                            return
+                        }
+                        let destination = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("SmartLook-CMM-\(UUID().uuidString).pdf")
+                        do {
+                            if FileManager.default.fileExists(atPath: destination.path) {
+                                try FileManager.default.removeItem(at: destination)
+                            }
+                            try FileManager.default.moveItem(at: tempLocation, to: destination)
+                        } catch {
+                            self.lastFlowStatus = "Could not save the authenticated CMM PDF: \(error.localizedDescription)."
+                            self.resetPDFTransfer(removeFile: true)
+                            self.publishStatus()
+                            return
+                        }
+                        self.transferURL = destination
+                        guard let document = PDFDocument(url: destination), document.pageCount > 0 else {
+                            self.lastFlowStatus = "Pinpoint data was received, but it is not a readable PDF."
+                            self.resetPDFTransfer(removeFile: true)
+                            self.publishStatus()
+                            return
+                        }
+                        guard page == 0 || (page > 0 && page <= document.pageCount) else {
+                            self.lastFlowStatus = "Trained page \(page) is outside this CMM PDF (\(document.pageCount) pages)."
+                            self.resetPDFTransfer(removeFile: true)
+                            self.publishStatus()
+                            return
+                        }
+                        self.lastFlowStatus = "Authenticated CMM PDF received (\(document.pageCount) pages); opening native viewer…"
+                        self.publishStatus()
+                        self.onPDFReady(destination, page)
+                    }
+                }
+                task.resume()
             }
-            task.resume()
         }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
