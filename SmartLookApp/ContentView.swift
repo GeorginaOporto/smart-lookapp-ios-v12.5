@@ -2595,7 +2595,11 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
             lastStatus = text;
             try { handler?.postMessage(text); } catch (_) {}
           };
-          const beginNativePDFTransfer = async () => {
+          const viewerSource = (() => {
+            const params = new URLSearchParams(location.search);
+            return params.get('file') || params.get('url') || '';
+          })();
+          const beginNativePDFTransfer = () => {
             if (nativeTransferStarted || !viewerSource) return;
             nativeTransferStarted = true;
             let source;
@@ -2606,61 +2610,8 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
               report('Pinpoint viewer source is not an approved AA CMM PDF endpoint.'); return;
             }
             report('PDF.js has no document; requesting the CMM through the authenticated Pinpoint session…');
-            try {
-              const response = await fetch(source.href, {
-                credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }
-              });
-              const mime = response.headers.get('content-type') || 'unknown MIME';
-              if (!response.ok || !/pdf|octet-stream/i.test(mime)) {
-                try { await response.body?.cancel(); } catch (_) {}
-                report('Authenticated CMM request returned HTTP ' + response.status + ', ' + mime + '; trying the integrated WebKit PDF reader…');
-                try { handler?.postMessage({ kind: 'nativeWebKitPDF', url: source.href, page: Number(goal.page || 0) }); } catch (_) {}
-                return;
-              }
-              if (!response.body?.getReader) {
-                report('Authenticated CMM response cannot be streamed; trying the integrated WebKit PDF reader…');
-                try { handler?.postMessage({ kind: 'nativeWebKitPDF', url: source.href, page: Number(goal.page || 0) }); } catch (_) {}
-                return;
-              }
-              const reader = response.body.getReader();
-              const first = await reader.read();
-              if (first.done) { report('Pinpoint returned an empty CMM PDF response.'); return; }
-              let initialBytes = first.value;
-              while (initialBytes.length < 5) {
-                const next = await reader.read();
-                if (next.done) break;
-                const joined = new Uint8Array(initialBytes.length + next.value.length);
-                joined.set(initialBytes); joined.set(next.value, initialBytes.length); initialBytes = joined;
-              }
-              if (initialBytes.length < 5 || String.fromCharCode(...initialBytes.slice(0, 5)) !== '%PDF-') {
-                try { await reader.cancel(); } catch (_) {}
-                report('Pinpoint returned a non-PDF body to the authenticated viewer.'); return;
-              }
-              try { handler?.postMessage({ kind: 'nativePDFStart', page: Number(goal.page || 0) }); } catch (_) {}
-              let transferred = 0, index = 0;
-              const sendChunk = bytes => {
-                let binary = '';
-                for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-                  binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-                }
-                const encoded = btoa(binary);
-                handler?.postMessage({ kind: 'nativePDFChunk', index: index++, data: encoded });
-                transferred += bytes.length;
-                if (transferred > 0 && transferred % (5 * 1024 * 1024) < bytes.length) {
-                  report('Receiving authenticated CMM PDF (' + Math.round(transferred / 1048576) + ' MB)…');
-                }
-              };
-              sendChunk(initialBytes);
-              while (true) {
-                const next = await reader.read();
-                if (next.done) break;
-                if (next.value?.length) sendChunk(next.value);
-              }
-              handler?.postMessage({ kind: 'nativePDFEnd', bytes: transferred, page: Number(goal.page || 0) });
-            } catch (error) {
-              report('Authenticated CMM PDF transfer failed; trying the integrated WebKit PDF reader…');
-              try { handler?.postMessage({ kind: 'nativeWebKitPDF', url: source.href, page: Number(goal.page || 0) }); } catch (_) {}
-            }
+            try { handler?.postMessage({ kind: 'nativePDFDownload', url: source.href, page: Number(goal.page || 0) }); }
+            catch (_) { report('Cannot reach the native downloader.'); }
           };
           const navigateToTrainedPage = () => {
             if (finished) return;
@@ -2839,9 +2790,97 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                     lastFlowStatus = "Receiving authenticated CMM PDF (\(bytes / 1_048_576) MB)…"
                     publishStatus()
                 }
+            case "nativePDFDownload":
+                guard let urlString = payload["url"] as? String,
+                      let sourceURL = URL(string: urlString),
+                      sourceURL.scheme?.lowercased() == "https",
+                      sourceURL.host?.lowercased() == "aa.flatironscloud.com",
+                      sourceURL.path.lowercased().contains("/ppserver/services/content/pdf/") else {
+                    lastFlowStatus = "Pinpoint viewer source is not an approved AA CMM PDF endpoint."
+                    publishStatus()
+                    return
+                }
+                resetPDFTransfer(removeFile: true)
+                transferPage = payload["page"] as? Int ?? 0
+                lastFlowStatus = "Requesting the CMM through the authenticated Pinpoint session…"
+                publishStatus()
+                downloadPDFNatively(from: sourceURL, page: transferPage)
             default:
                 break
             }
+        }
+
+        /// Downloads the authenticated CMM PDF directly with URLSession instead of
+        /// relaying it through the JS bridge as base64 chunks. `WKWebsiteDataStore
+        /// .default()` (used by this web view) shares its cookies with
+        /// `HTTPCookieStorage.shared`, so a plain URLSession request carries the same
+        /// Pinpoint session the WKWebView is authenticated with, without needing the
+        /// page's own JS `fetch` at all. This avoids the fragile chunk-relay path
+        /// (hundreds of postMessage round trips for a large CMM) entirely.
+        private func downloadPDFNatively(from sourceURL: URL, page: Int) {
+            var request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.setValue("application/pdf", forHTTPHeaderField: "Accept")
+            request.setValue("https://aa.flatironscloud.com/", forHTTPHeaderField: "Referer")
+            let configuration = URLSessionConfiguration.default
+            configuration.httpCookieStorage = HTTPCookieStorage.shared
+            configuration.httpShouldSetCookies = true
+            let session = URLSession(configuration: configuration)
+            let task = session.downloadTask(with: request) { [weak self] location, response, error in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    if let error {
+                        self.lastFlowStatus = "Authenticated CMM download failed: \(error.localizedDescription)."
+                        self.resetPDFTransfer(removeFile: true)
+                        self.publishStatus()
+                        return
+                    }
+                    let http = response as? HTTPURLResponse
+                    let mime = http?.mimeType?.lowercased() ?? ""
+                    guard let http, (200...299).contains(http.statusCode),
+                          mime.isEmpty || mime.contains("pdf") || mime.contains("octet-stream") else {
+                        self.lastFlowStatus = "Authenticated CMM request returned HTTP \(http?.statusCode ?? -1), \(mime.isEmpty ? "unknown MIME" : mime)."
+                        self.resetPDFTransfer(removeFile: true)
+                        self.publishStatus()
+                        return
+                    }
+                    guard let tempLocation = location else {
+                        self.lastFlowStatus = "Pinpoint returned an empty CMM PDF response."
+                        self.resetPDFTransfer(removeFile: true)
+                        self.publishStatus()
+                        return
+                    }
+                    let destination = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("SmartLook-CMM-\(UUID().uuidString).pdf")
+                    do {
+                        if FileManager.default.fileExists(atPath: destination.path) {
+                            try FileManager.default.removeItem(at: destination)
+                        }
+                        try FileManager.default.moveItem(at: tempLocation, to: destination)
+                    } catch {
+                        self.lastFlowStatus = "Could not save the authenticated CMM PDF: \(error.localizedDescription)."
+                        self.resetPDFTransfer(removeFile: true)
+                        self.publishStatus()
+                        return
+                    }
+                    self.transferURL = destination
+                    guard let document = PDFDocument(url: destination), document.pageCount > 0 else {
+                        self.lastFlowStatus = "Pinpoint data was received, but it is not a readable PDF."
+                        self.resetPDFTransfer(removeFile: true)
+                        self.publishStatus()
+                        return
+                    }
+                    guard page == 0 || (page > 0 && page <= document.pageCount) else {
+                        self.lastFlowStatus = "Trained page \(page) is outside this CMM PDF (\(document.pageCount) pages)."
+                        self.resetPDFTransfer(removeFile: true)
+                        self.publishStatus()
+                        return
+                    }
+                    self.lastFlowStatus = "Authenticated CMM PDF received (\(document.pageCount) pages); opening native viewer…"
+                    self.publishStatus()
+                    self.onPDFReady(destination, page)
+                }
+            }
+            task.resume()
         }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -2871,7 +2910,7 @@ private struct MVDCMMPortalWebView: UIViewRepresentable {
                 }
                 return
             } else if let payload = message.body as? [String: Any],
-                      ["nativePDFStart", "nativePDFChunk", "nativePDFEnd", "nativePDFProgress"].contains(payload["kind"] as? String ?? "") {
+                      ["nativePDFStart", "nativePDFChunk", "nativePDFEnd", "nativePDFProgress", "nativePDFDownload"].contains(payload["kind"] as? String ?? "") {
                 guard message.frameInfo.request.url?.path.lowercased().hasSuffix("/viewer.html") == true else { return }
                 receivePDFTransferMessage(payload)
                 return
